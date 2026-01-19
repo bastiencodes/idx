@@ -20,14 +20,10 @@ services:
     build: .
     command:
       - up
-      - --rpc
-      - "${RPC_URL:-https://rpc.moderato.tempo.xyz}"
+      - --chain
+      - "${CHAIN:-andantino}"
       - --db
       - "postgres://ak47:${POSTGRES_PASSWORD:-ak47}@timescaledb:5432/ak47"
-      - --port
-      - "8080"
-      - --metrics-port
-      - "9090"
     ports:
       - "8080:8080"   # HTTP API
       - "9090:9090"   # Prometheus metrics

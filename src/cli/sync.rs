@@ -11,9 +11,13 @@ use ak47::sync::writer::load_sync_state;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// RPC endpoint URL
+    /// Chain name (presto, andantino, moderato) - uses preset RPC URL
+    #[arg(long, env = "AK47_CHAIN")]
+    pub chain: Option<String>,
+
+    /// RPC endpoint URL (overrides --chain)
     #[arg(long, env = "AK47_RPC_URL")]
-    pub rpc: String,
+    pub rpc: Option<String>,
 
     /// Database URL
     #[arg(long, env = "AK47_DATABASE_URL")]
@@ -49,6 +53,8 @@ pub enum SyncCommands {
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    let rpc_url = resolve_rpc(&args.rpc, &args.chain)?;
+
     let pool = db::create_pool(&args.db).await?;
     if !args.skip_migrations {
         db::run_migrations(&pool).await?;
@@ -60,14 +66,35 @@ pub async fn run(args: Args) -> Result<()> {
             to,
             batch_size,
         } => {
-            run_backfill(&pool, &args.rpc, from, to, batch_size).await?;
+            run_backfill(&pool, &rpc_url, from, to, batch_size).await?;
         }
         SyncCommands::Status => {
-            run_status(&pool, &args.rpc).await?;
+            run_status(&pool, &rpc_url).await?;
         }
     }
 
     Ok(())
+}
+
+fn resolve_rpc(rpc: &Option<String>, chain: &Option<String>) -> Result<String> {
+    match (rpc, chain) {
+        (Some(rpc), _) => Ok(rpc.clone()),
+        (None, Some(chain_name)) => {
+            let chain = ak47::config::get_chain(chain_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown chain '{}'. Available: presto, andantino, moderato",
+                    chain_name
+                )
+            })?;
+            info!(
+                chain = chain.name,
+                rpc = chain.rpc_url,
+                "Using preset chain config"
+            );
+            Ok(chain.rpc_url.to_string())
+        }
+        (None, None) => Err(anyhow::anyhow!("Either --chain or --rpc must be specified")),
+    }
 }
 
 async fn run_backfill(

@@ -11,9 +11,13 @@ use ak47::sync::engine::SyncEngine;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// RPC endpoint URL
+    /// Chain name (presto, andantino, moderato) - uses preset RPC URL
+    #[arg(long, env = "AK47_CHAIN")]
+    pub chain: Option<String>,
+
+    /// RPC endpoint URL (overrides --chain)
     #[arg(long, env = "AK47_RPC_URL")]
-    pub rpc: String,
+    pub rpc: Option<String>,
 
     /// Database URL
     #[arg(long, env = "AK47_DATABASE_URL")]
@@ -33,8 +37,26 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    let rpc_url = match (&args.rpc, &args.chain) {
+        (Some(rpc), _) => rpc.clone(),
+        (None, Some(chain_name)) => {
+            let chain = ak47::config::get_chain(chain_name)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Unknown chain '{}'. Available: presto, andantino, moderato",
+                    chain_name
+                ))?;
+            info!(chain = chain.name, rpc = chain.rpc_url, "Using preset chain config");
+            chain.rpc_url.to_string()
+        }
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "Either --chain or --rpc must be specified"
+            ));
+        }
+    };
+
     let config = Config {
-        rpc_url: args.rpc,
+        rpc_url,
         database_url: args.db,
     };
 

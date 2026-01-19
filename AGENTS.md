@@ -42,7 +42,11 @@ docker run --rm --network host ghcr.io/tempoxyz/tempo-bench:latest \
 ### Run (Docker)
 ```bash
 # Production deployment with TimescaleDB, Prometheus, Grafana
-RPC_URL=https://rpc.testnet.tempo.xyz docker compose up -d
+# Default chain: andantino (testnet)
+docker compose up -d
+
+# Use a different chain (presto=mainnet, moderato)
+CHAIN=presto docker compose up -d
 
 # View logs
 docker compose logs -f ak47
@@ -55,7 +59,10 @@ docker compose logs -f ak47
 
 ### Run (Local)
 ```bash
-# Start continuous head-following sync + HTTP API on port 8080 (requires DB)
+# Start with preset chain config (presto, andantino, moderato)
+cargo run -- up --chain andantino --db postgres://ak47:ak47@localhost:5432/ak47
+
+# Or with custom RPC URL
 cargo run -- up --rpc https://rpc.testnet.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47
 
 # Check sync status (shows forward progress, backfill progress, gaps)
