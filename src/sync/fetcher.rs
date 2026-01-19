@@ -31,6 +31,7 @@ struct RpcResponse<T> {
 
 #[derive(Deserialize, Debug)]
 struct RpcError {
+    #[allow(dead_code)]
     code: i64,
     message: String,
 }
@@ -38,14 +39,17 @@ struct RpcError {
 impl RpcClient {
     pub fn new(url: &str) -> Self {
         let client = reqwest::Client::builder()
-            .gzip(true) // Enable gzip decompression for responses
+            .gzip(true)
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build HTTP client");
 
         Self {
             client,
             url: url.to_string(),
-            log_chunk_size: std::sync::Arc::new(AtomicU64::new(1000)), // Start optimistic
+            log_chunk_size: std::sync::Arc::new(AtomicU64::new(1000)),
         }
     }
 
@@ -150,7 +154,8 @@ impl RpcClient {
 
     #[allow(dead_code)]
     pub async fn get_logs(&self, from: u64, to: u64) -> Result<Vec<TempoLog>> {
-        let mut all_logs = Vec::new();
+        let estimated_logs = ((to - from + 1) * 100) as usize;
+        let mut all_logs = Vec::with_capacity(estimated_logs.min(10_000));
         let mut start = from;
 
         while start <= to {

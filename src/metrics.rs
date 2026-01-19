@@ -69,7 +69,6 @@ pub fn record_query_rows(count: u64) {
 pub struct SyncProgress {
     chain_id: u64,
     last_report: Instant,
-    #[allow(dead_code)]
     last_block: u64,
     blocks_since_report: u64,
 }

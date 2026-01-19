@@ -8,7 +8,7 @@ use crate::db::Pool;
 use crate::types::{BlockRow, LogRow, SyncState, TxRow};
 
 pub async fn write_block(pool: &Pool, block: &BlockRow) -> Result<()> {
-    write_blocks(pool, &[block.clone()]).await
+    write_blocks(pool, std::slice::from_ref(block)).await
 }
 
 /// Batch insert multiple blocks in a single query
@@ -69,15 +69,15 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     let conn = pool.get().await?;
 
-    // COPY doesn't support ON CONFLICT, so we use an unlogged staging table + INSERT SELECT
-    // Using unlogged for speed since staging data is transient
+    let staging_table = format!("txs_staging_{}", std::process::id());
+    
     conn.execute(
-        "CREATE UNLOGGED TABLE IF NOT EXISTS txs_staging (LIKE txs INCLUDING DEFAULTS)",
+        &format!("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE txs INCLUDING DEFAULTS) ON COMMIT DROP", staging_table),
         &[],
     )
     .await?;
 
-    conn.execute("TRUNCATE txs_staging", &[]).await?;
+    conn.execute(&format!("TRUNCATE {}", staging_table), &[]).await?;
 
     // Binary COPY into staging table
     let types = &[
@@ -107,10 +107,10 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            r#"COPY txs_staging (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
+            &format!(r#"COPY {} (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
                 gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used,
                 nonce_key, nonce, fee_token, fee_payer, calls, call_count,
-                valid_before, valid_after, signature_type) FROM STDIN BINARY"#,
+                valid_before, valid_after, signature_type) FROM STDIN BINARY"#, staging_table),
         )
         .await?;
 
@@ -149,9 +149,8 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     pinned_writer.as_mut().finish().await?;
 
-    // Move from staging to main table, ignoring conflicts
     conn.execute(
-        r#"INSERT INTO txs SELECT * FROM txs_staging ON CONFLICT (block_num, idx) DO NOTHING"#,
+        &format!(r#"INSERT INTO txs SELECT * FROM {} ON CONFLICT (block_num, idx) DO NOTHING"#, staging_table),
         &[],
     )
     .await?;
@@ -167,14 +166,15 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     let conn = pool.get().await?;
 
-    // COPY doesn't support ON CONFLICT, so we use an unlogged staging table + INSERT SELECT
+    let staging_table = format!("logs_staging_{}", std::process::id());
+    
     conn.execute(
-        "CREATE UNLOGGED TABLE IF NOT EXISTS logs_staging (LIKE logs INCLUDING DEFAULTS)",
+        &format!("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE logs INCLUDING DEFAULTS) ON COMMIT DROP", staging_table),
         &[],
     )
     .await?;
 
-    conn.execute("TRUNCATE logs_staging", &[]).await?;
+    conn.execute(&format!("TRUNCATE {}", staging_table), &[]).await?;
 
     // Binary COPY into staging table
     let types = &[
@@ -191,7 +191,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            "COPY logs_staging (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY",
+            &format!("COPY {} (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY", staging_table),
         )
         .await?;
 
@@ -217,9 +217,8 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     pinned_writer.as_mut().finish().await?;
 
-    // Move from staging to main table, ignoring conflicts
     conn.execute(
-        "INSERT INTO logs SELECT * FROM logs_staging ON CONFLICT (block_num, log_idx) DO NOTHING",
+        &format!("INSERT INTO logs SELECT * FROM {} ON CONFLICT (block_num, log_idx) DO NOTHING", staging_table),
         &[],
     )
     .await?;

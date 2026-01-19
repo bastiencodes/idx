@@ -53,7 +53,7 @@ pub struct LogRow {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncState {
     pub chain_id: u64,
     /// Remote chain head block number
@@ -62,17 +62,6 @@ pub struct SyncState {
     pub synced_num: u64,
     /// Lowest block synced going backwards (None = not started, Some(0) = complete)
     pub backfill_num: Option<u64>,
-}
-
-impl Default for SyncState {
-    fn default() -> Self {
-        Self {
-            chain_id: 0,
-            head_num: 0,
-            synced_num: 0,
-            backfill_num: None,
-        }
-    }
 }
 
 impl SyncState {

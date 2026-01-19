@@ -90,10 +90,10 @@ impl TempoTransaction {
     }
 
     pub fn effective_to(&self) -> Option<Address> {
-        if let Some(calls) = &self.calls {
-            if let Some(first) = calls.first() {
-                return first.to;
-            }
+        if let Some(calls) = &self.calls
+            && let Some(first) = calls.first()
+        {
+            return first.to;
         }
         self.to
     }
@@ -108,10 +108,10 @@ impl TempoTransaction {
     }
 
     pub fn effective_input(&self) -> Bytes {
-        if let Some(calls) = &self.calls {
-            if let Some(first) = calls.first() {
-                return first.input.clone().or(first.data.clone()).unwrap_or_default();
-            }
+        if let Some(calls) = &self.calls
+            && let Some(first) = calls.first()
+        {
+            return first.input.clone().or(first.data.clone()).unwrap_or_default();
         }
         self.input.clone().unwrap_or_default()
     }

@@ -3,9 +3,15 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::tempo::{TempoBlock, TempoLog, TempoTransaction};
 use crate::types::{BlockRow, LogRow, TxRow};
 
+pub fn timestamp_from_secs(secs: u64) -> DateTime<Utc> {
+    Utc.timestamp_opt(secs as i64, 0)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap())
+}
+
 pub fn decode_block(block: &TempoBlock) -> BlockRow {
     let timestamp_secs = block.timestamp_u64();
-    let timestamp = Utc.timestamp_opt(timestamp_secs as i64, 0).unwrap();
+    let timestamp = timestamp_from_secs(timestamp_secs);
     let timestamp_ms = block.timestamp_millis_u64() as i64;
 
     BlockRow {
@@ -22,8 +28,7 @@ pub fn decode_block(block: &TempoBlock) -> BlockRow {
 }
 
 pub fn decode_transaction(tx: &TempoTransaction, block: &TempoBlock, idx: u32) -> TxRow {
-    let timestamp_secs = block.timestamp_u64();
-    let block_timestamp = Utc.timestamp_opt(timestamp_secs as i64, 0).unwrap();
+    let block_timestamp = timestamp_from_secs(block.timestamp_u64());
 
     let nonce_key = tx
         .nonce_key

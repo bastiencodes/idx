@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -9,7 +8,7 @@ use crate::db::Pool;
 use crate::metrics::{self, SyncProgress};
 use crate::types::SyncState;
 
-use super::decoder::{decode_block, decode_log, decode_transaction};
+use super::decoder::{decode_block, decode_log, decode_transaction, timestamp_from_secs};
 use super::fetcher::RpcClient;
 use super::writer::{
     detect_gaps, get_block_hash, load_sync_state, save_sync_state, write_block, write_blocks,
@@ -165,19 +164,19 @@ impl SyncEngine {
         let first_num = first_block.number_u64();
 
         // Check parent hash against stored block (if not genesis)
-        if first_num > 0 {
-            if let Some(stored_hash) = get_block_hash(&self.pool, first_num - 1).await? {
-                let expected_parent: [u8; 32] = stored_hash
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("Invalid stored hash length"))?;
-                if first_block.parent_hash.0 != expected_parent {
-                    return Err(anyhow::anyhow!(
-                        "Parent hash mismatch at block {}: expected {:?}, got {:?}",
-                        first_num,
-                        hex::encode(expected_parent),
-                        hex::encode(first_block.parent_hash.0)
-                    ));
-                }
+        if first_num > 0
+            && let Some(stored_hash) = get_block_hash(&self.pool, first_num - 1).await?
+        {
+            let expected_parent: [u8; 32] = stored_hash
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid stored hash length"))?;
+            if first_block.parent_hash.0 != expected_parent {
+                return Err(anyhow::anyhow!(
+                    "Parent hash mismatch at block {}: expected {:?}, got {:?}",
+                    first_num,
+                    hex::encode(expected_parent),
+                    hex::encode(first_block.parent_hash.0)
+                ));
             }
         }
 
@@ -232,10 +231,7 @@ impl SyncEngine {
 
         let block_timestamps: HashMap<u64, _> = blocks
             .iter()
-            .map(|b| {
-                let ts = Utc.timestamp_opt(b.timestamp_u64() as i64, 0).unwrap();
-                (b.number_u64(), ts)
-            })
+            .map(|b| (b.number_u64(), timestamp_from_secs(b.timestamp_u64())))
             .collect();
 
         let block_rows: Vec<_> = blocks.iter().map(decode_block).collect();
@@ -266,47 +262,6 @@ impl SyncEngine {
         Ok((blocks, receipts, block_rows, all_txs, all_logs))
     }
 
-    #[allow(dead_code)]
-    async fn tick(&mut self) -> Result<()> {
-        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
-        let remote_head = self.rpc.latest_block_number().await?;
-
-        let synced = if state.chain_id == self.chain_id {
-            state.synced_num
-        } else {
-            0
-        };
-
-        if synced >= remote_head {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            return Ok(());
-        }
-
-        let from = synced + 1;
-        // Smaller batches since receipts can be large (7k+ per block at high TPS)
-        let to = (from + 9).min(remote_head);
-
-        self.sync_range(from, to).await?;
-
-        let new_state = SyncState {
-            chain_id: self.chain_id,
-            head_num: remote_head,
-            synced_num: to,
-            backfill_num: state.backfill_num,
-        };
-        save_sync_state(&self.pool, &new_state).await?;
-
-        info!(
-            from = from,
-            to = to,
-            head = remote_head,
-            lag = remote_head - to,
-            "Synced blocks"
-        );
-
-        Ok(())
-    }
-
     pub async fn sync_range(&self, from: u64, to: u64) -> Result<()> {
         // Fetch blocks and receipts in parallel (receipts contain logs)
         let (blocks, receipts) = tokio::try_join!(
@@ -316,10 +271,7 @@ impl SyncEngine {
 
         let block_timestamps: HashMap<u64, _> = blocks
             .iter()
-            .map(|b| {
-                let ts = Utc.timestamp_opt(b.timestamp_u64() as i64, 0).unwrap();
-                (b.number_u64(), ts)
-            })
+            .map(|b| (b.number_u64(), timestamp_from_secs(b.timestamp_u64())))
             .collect();
 
         // Decode all blocks, transactions, and logs upfront
@@ -363,7 +315,7 @@ impl SyncEngine {
         )?;
 
         let block_row = decode_block(&block);
-        let block_ts = Utc.timestamp_opt(block.timestamp_u64() as i64, 0).unwrap();
+        let block_ts = timestamp_from_secs(block.timestamp_u64());
         write_block(&self.pool, &block_row).await?;
 
         let txs: Vec<_> = block

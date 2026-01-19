@@ -93,6 +93,8 @@ pub async fn execute_query(
 
     let conn = pool.get().await?;
 
+    // Force read-only transaction at database level (defense in depth)
+    conn.execute("SET TRANSACTION READ ONLY", &[]).await?;
     conn.execute(
         &format!("SET statement_timeout = {}", options.timeout_ms),
         &[],
@@ -170,7 +172,7 @@ pub fn format_column_json(row: &tokio_postgres::Row, idx: usize) -> serde_json::
         "float4" | "float8" => row
             .try_get::<_, f64>(idx)
             .ok()
-            .and_then(|v| serde_json::Number::from_f64(v))
+            .and_then(serde_json::Number::from_f64)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         "bytea" => row

@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, Bytes, B256, U64, U256};
+use alloy::primitives::{Address, B256, U64, U256};
 use serde::{Deserialize, Serialize};
 
 use super::TempoLog;

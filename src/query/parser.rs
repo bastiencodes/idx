@@ -8,6 +8,13 @@ pub struct EventSignature {
     pub topic0: [u8; 32],
 }
 
+fn is_valid_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl EventSignature {
     pub fn parse(sig: &str) -> Result<Self> {
         let sig = sig.trim();
@@ -26,6 +33,10 @@ impl EventSignature {
         let name = sig[..open_paren].trim().to_string();
         if name.is_empty() {
             return Err(anyhow!("Invalid signature: empty event name"));
+        }
+        
+        if !is_valid_identifier(&name) {
+            return Err(anyhow!("Invalid signature: event name must be alphanumeric"));
         }
 
         let params_str = &sig[open_paren + 1..close_paren];
@@ -170,6 +181,12 @@ impl AbiParam {
             _ => return Err(anyhow!("Invalid parameter format: {}", s)),
         };
 
+        if let Some(ref n) = name
+            && !is_valid_identifier(n)
+        {
+            return Err(anyhow!("Invalid parameter name: must be alphanumeric"));
+        }
+
         let ty = AbiType::parse(ty_str)?;
 
         Ok(Self { name, ty, indexed })
@@ -234,20 +251,20 @@ impl AbiType {
             return Ok(AbiType::Bytes(Some(size)));
         }
 
-        if s.ends_with("[]") {
-            let inner = AbiType::parse(&s[..s.len() - 2])?;
+        if let Some(inner_str) = s.strip_suffix("[]") {
+            let inner = AbiType::parse(inner_str)?;
             return Ok(AbiType::DynamicArray(Box::new(inner)));
         }
 
-        if let Some(bracket_pos) = s.rfind('[') {
-            if s.ends_with(']') {
-                let inner = AbiType::parse(&s[..bracket_pos])?;
-                let size_str = &s[bracket_pos + 1..s.len() - 1];
-                let size: usize = size_str
-                    .parse()
-                    .map_err(|_| anyhow!("Invalid array size: {}", size_str))?;
-                return Ok(AbiType::FixedArray(Box::new(inner), size));
-            }
+        if let Some(bracket_pos) = s.rfind('[')
+            && let Some(inner_with_bracket) = s.strip_suffix(']')
+        {
+            let inner = AbiType::parse(&s[..bracket_pos])?;
+            let size_str = &inner_with_bracket[bracket_pos + 1..];
+            let size: usize = size_str
+                .parse()
+                .map_err(|_| anyhow!("Invalid array size: {}", size_str))?;
+            return Ok(AbiType::FixedArray(Box::new(inner), size));
         }
 
         Err(anyhow!("Unknown ABI type: {}", s))

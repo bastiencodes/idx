@@ -82,8 +82,8 @@ async fn handle_query(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     let options = QueryOptions {
-        timeout_ms: req.timeout_ms.min(30000), // Cap at 30s
-        limit: req.limit.min(100000),          // Cap at 100k rows
+        timeout_ms: req.timeout_ms.clamp(100, 30000), // 100ms - 30s
+        limit: req.limit.clamp(1, 100000),            // 1 - 100k rows
     };
 
     let result = crate::service::execute_query(
@@ -126,16 +126,18 @@ async fn handle_logs(
         "1 = 1".to_string()
     };
 
+    let event_name = extract_event_name(&signature)?;
+    
     let sql = format!(
-        "SELECT * FROM {} WHERE {} ORDER BY block_timestamp DESC LIMIT {}",
-        extract_event_name(&signature),
+        "SELECT * FROM \"{}\" WHERE {} ORDER BY block_timestamp DESC LIMIT {}",
+        event_name,
         time_filter,
-        params.limit.min(10000)
+        params.limit.clamp(1, 10000)
     );
 
     let options = QueryOptions {
         timeout_ms: 5000,
-        limit: params.limit.min(10000),
+        limit: params.limit.clamp(1, 10000),
     };
 
     let result = crate::service::execute_query(&state.pool, &sql, Some(&signature), &options)
@@ -145,12 +147,29 @@ async fn handle_logs(
     Ok(Json(QueryResponse { result, ok: true }))
 }
 
-fn extract_event_name(signature: &str) -> String {
-    signature
+fn extract_event_name(signature: &str) -> Result<String, ApiError> {
+    let name = signature
         .split('(')
         .next()
-        .unwrap_or("Event")
-        .to_string()
+        .unwrap_or("")
+        .trim();
+    
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("Empty event name".into()));
+    }
+    
+    if name.len() > 64 {
+        return Err(ApiError::BadRequest("Event name too long".into()));
+    }
+    
+    let is_valid = name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    
+    if !is_valid {
+        return Err(ApiError::BadRequest("Invalid event name: must be alphanumeric".into()));
+    }
+    
+    Ok(name.to_string())
 }
 
 fn parse_time_filter(after: &str) -> Result<String, ApiError> {
@@ -159,6 +178,9 @@ fn parse_time_filter(after: &str) -> Result<String, ApiError> {
             .trim_end_matches('h')
             .parse()
             .map_err(|_| ApiError::BadRequest("Invalid time format".into()))?;
+        if hours <= 0 || hours > 8760 {
+            return Err(ApiError::BadRequest("Hours must be between 1 and 8760".into()));
+        }
         Ok(format!(
             "block_timestamp > NOW() - INTERVAL '{} hours'",
             hours
@@ -168,12 +190,17 @@ fn parse_time_filter(after: &str) -> Result<String, ApiError> {
             .trim_end_matches('d')
             .parse()
             .map_err(|_| ApiError::BadRequest("Invalid time format".into()))?;
+        if days <= 0 || days > 365 {
+            return Err(ApiError::BadRequest("Days must be between 1 and 365".into()));
+        }
         Ok(format!(
             "block_timestamp > NOW() - INTERVAL '{} days'",
             days
         ))
     } else {
-        Ok(format!("block_timestamp > '{}'", after))
+        let parsed = chrono::DateTime::parse_from_rfc3339(after)
+            .map_err(|_| ApiError::BadRequest("Invalid timestamp format. Use RFC3339 or relative time (e.g., '1h', '7d')".into()))?;
+        Ok(format!("block_timestamp > '{}'", parsed.to_rfc3339()))
     }
 }
 
