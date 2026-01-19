@@ -26,9 +26,9 @@ pub async fn run(args: Args) -> Result<()> {
         "Loaded config"
     );
 
-    if config.metrics_port > 0 {
+    if config.prometheus.enabled {
         let metrics_addr: SocketAddr =
-            format!("{}:{}", config.bind, config.metrics_port).parse()?;
+            format!("{}:{}", config.http.bind, config.prometheus.port).parse()?;
         info!(addr = %metrics_addr, "Starting Prometheus metrics server");
         PrometheusBuilder::new()
             .with_http_listener(metrics_addr)
@@ -52,8 +52,8 @@ pub async fn run(args: Args) -> Result<()> {
         }
     });
 
-    if config.port > 0 {
-        let addr: SocketAddr = format!("{}:{}", config.bind, config.port).parse()?;
+    if config.http.enabled {
+        let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
         let router = api::router(pool.clone());
 
         info!(addr = %addr, "Starting HTTP API server");

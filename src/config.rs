@@ -7,23 +7,68 @@ pub struct Config {
     /// Database connection URL
     pub database_url: String,
 
-    /// HTTP API port (default: 8080, 0 to disable)
-    #[serde(default = "default_port")]
-    pub port: u16,
+    /// HTTP API settings
+    #[serde(default)]
+    pub http: HttpConfig,
 
-    /// Bind address (default: 0.0.0.0)
-    #[serde(default = "default_bind")]
-    pub bind: String,
-
-    /// Metrics port (default: 9090, 0 to disable)
-    #[serde(default = "default_metrics_port")]
-    pub metrics_port: u16,
+    /// Prometheus metrics settings
+    #[serde(default)]
+    pub prometheus: PrometheusConfig,
 
     /// Chains to index
     pub chains: Vec<ChainConfig>,
 }
 
-fn default_port() -> u16 {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Enable HTTP API (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// HTTP API port (default: 8080)
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+
+    /// Bind address (default: 0.0.0.0)
+    #[serde(default = "default_bind")]
+    pub bind: String,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 8080,
+            bind: "0.0.0.0".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrometheusConfig {
+    /// Enable Prometheus metrics (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Metrics port (default: 9090)
+    #[serde(default = "default_metrics_port")]
+    pub port: u16,
+}
+
+impl Default for PrometheusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 9090,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_http_port() -> u16 {
     8080
 }
 

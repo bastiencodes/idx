@@ -3,18 +3,20 @@
 # Use timescaledb for docker, localhost for local dev
 database_url = "postgres://ak47:ak47@timescaledb:5432/ak47"
 
-# HTTP API settings
+[http]
+enabled = true
 port = 8080
 bind = "0.0.0.0"
 
-# Prometheus metrics
-metrics_port = 9090
+[prometheus]
+enabled = true
+port = 9090
 
 # Chains to index
 [[chains]]
-name = "moderato"
+name = "andantino"
 chain_id = 42429
-rpc_url = "https://rpc.moderato.tempo.xyz"
+rpc_url = "https://rpc.testnet.tempo.xyz"
 backfill = true
 batch_size = 100
 

@@ -2,9 +2,14 @@
 
 database_url = "postgres://ak47:ak47@timescaledb:5432/ak47_test"
 
+[http]
+enabled = true
 port = 8080
 bind = "0.0.0.0"
-metrics_port = 9090
+
+[prometheus]
+enabled = true
+port = 9090
 
 [[chains]]
 name = "dev"
