@@ -53,6 +53,22 @@ pub struct LogRow {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReceiptRow {
+    pub block_num: i64,
+    pub block_timestamp: DateTime<Utc>,
+    pub tx_idx: i32,
+    pub tx_hash: Vec<u8>,
+    pub from: Vec<u8>,
+    pub to: Option<Vec<u8>>,
+    pub contract_address: Option<Vec<u8>>,
+    pub gas_used: i64,
+    pub cumulative_gas_used: i64,
+    pub effective_gas_price: Option<String>,
+    pub status: Option<i16>,
+    pub fee_payer: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncState {
     pub chain_id: u64,

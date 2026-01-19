@@ -1,7 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::tempo::{TempoBlock, TempoLog, TempoTransaction};
-use crate::types::{BlockRow, LogRow, TxRow};
+use crate::tempo::{TempoBlock, TempoLog, TempoReceipt, TempoTransaction};
+use crate::types::{BlockRow, LogRow, ReceiptRow, TxRow};
 
 pub fn decode_block(block: &TempoBlock) -> BlockRow {
     let timestamp_secs = block.timestamp_u64();
@@ -78,5 +78,22 @@ pub fn decode_log(log: &TempoLog, block_timestamp: DateTime<Utc>) -> LogRow {
         selector,
         topics,
         data: log.data.to_vec(),
+    }
+}
+
+pub fn decode_receipt(receipt: &TempoReceipt, block_timestamp: DateTime<Utc>) -> ReceiptRow {
+    ReceiptRow {
+        block_num: receipt.block_number.to::<u64>() as i64,
+        block_timestamp,
+        tx_idx: receipt.transaction_index.to::<u64>() as i32,
+        tx_hash: receipt.transaction_hash.as_slice().to_vec(),
+        from: receipt.from.as_slice().to_vec(),
+        to: receipt.to.map(|a| a.as_slice().to_vec()),
+        contract_address: receipt.contract_address.map(|a| a.as_slice().to_vec()),
+        gas_used: receipt.gas_used.to::<u64>() as i64,
+        cumulative_gas_used: receipt.cumulative_gas_used.to::<u64>() as i64,
+        effective_gas_price: receipt.effective_gas_price.map(|p| p.to_string()),
+        status: receipt.status.map(|s| s.to::<u64>() as i16),
+        fee_payer: receipt.fee_payer.map(|a| a.as_slice().to_vec()),
     }
 }

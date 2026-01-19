@@ -9,11 +9,11 @@ use crate::db::Pool;
 use crate::metrics::{self, SyncProgress};
 use crate::types::SyncState;
 
-use super::decoder::{decode_block, decode_log, decode_transaction};
+use super::decoder::{decode_block, decode_log, decode_receipt, decode_transaction};
 use super::fetcher::RpcClient;
 use super::writer::{
     detect_gaps, get_block_hash, load_sync_state, save_sync_state, write_block, write_blocks,
-    write_logs, write_txs,
+    write_logs, write_receipts, write_txs,
 };
 
 pub struct SyncEngine {
@@ -83,7 +83,7 @@ impl SyncEngine {
         let mut current_fetch = Some(self.fetch_range(current_from, current_to).await?);
 
         while current_from <= remote_head {
-            let (blocks, _receipts, block_rows, all_txs, all_logs) = current_fetch.take().unwrap();
+            let (blocks, block_rows, all_txs, all_logs, all_receipts) = current_fetch.take().unwrap();
 
             // Start fetching next batch while we write current batch
             let next_from = current_to + 1;
@@ -101,6 +101,7 @@ impl SyncEngine {
                 write_blocks(&self.pool, &block_rows).await?;
                 write_txs(&self.pool, &all_txs).await?;
                 write_logs(&self.pool, &all_logs).await?;
+                write_receipts(&self.pool, &all_receipts).await?;
                 Ok::<_, anyhow::Error>(())
             };
 
@@ -217,10 +218,10 @@ impl SyncEngine {
         to: u64,
     ) -> Result<(
         Vec<crate::tempo::TempoBlock>,
-        Vec<Vec<crate::tempo::TempoReceipt>>,
         Vec<crate::types::BlockRow>,
         Vec<crate::types::TxRow>,
         Vec<crate::types::LogRow>,
+        Vec<crate::types::ReceiptRow>,
     )> {
         let (blocks, receipts) = tokio::try_join!(
             self.rpc.get_blocks_batch(from..=to),
@@ -263,7 +264,16 @@ impl SyncEngine {
             })
             .collect();
 
-        Ok((blocks, receipts, block_rows, all_txs, all_logs))
+        let all_receipts: Vec<_> = receipts
+            .iter()
+            .flatten()
+            .filter_map(|receipt| {
+                let block_num = receipt.block_number.to::<u64>();
+                block_timestamps.get(&block_num).map(|&ts| decode_receipt(receipt, ts))
+            })
+            .collect();
+
+        Ok((blocks, block_rows, all_txs, all_logs, all_receipts))
     }
 
     #[allow(dead_code)]
@@ -348,10 +358,20 @@ impl SyncEngine {
             })
             .collect();
 
+        let all_receipts: Vec<_> = receipts
+            .iter()
+            .flatten()
+            .filter_map(|receipt| {
+                let block_num = receipt.block_number.to::<u64>();
+                block_timestamps.get(&block_num).map(|&ts| decode_receipt(receipt, ts))
+            })
+            .collect();
+
         // Batch write all data (single query per table)
         write_blocks(&self.pool, &block_rows).await?;
         write_txs(&self.pool, &all_txs).await?;
         write_logs(&self.pool, &all_logs).await?;
+        write_receipts(&self.pool, &all_receipts).await?;
 
         Ok(())
     }
@@ -380,6 +400,13 @@ impl SyncEngine {
             .flat_map(|r| r.logs.iter().map(|log| decode_log(log, block_ts)))
             .collect();
         write_logs(&self.pool, &log_rows).await?;
+
+        // Extract receipt rows
+        let receipt_rows: Vec<_> = receipts
+            .iter()
+            .map(|r| decode_receipt(r, block_ts))
+            .collect();
+        write_receipts(&self.pool, &receipt_rows).await?;
 
         // Update sync state
         let state = load_sync_state(&self.pool).await?.unwrap_or_default();

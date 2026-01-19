@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, Bytes, B256, U64, U256};
+use alloy::primitives::{Address, B256, U64, U256};
 use serde::{Deserialize, Serialize};
 
 use super::TempoLog;
@@ -22,4 +22,6 @@ pub struct TempoReceipt {
     pub status: Option<U64>,
     #[serde(default)]
     pub effective_gas_price: Option<U256>,
+    #[serde(default)]
+    pub fee_payer: Option<Address>,
 }
