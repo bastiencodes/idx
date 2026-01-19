@@ -11,7 +11,10 @@ use crate::types::SyncState;
 
 use super::decoder::{decode_block, decode_log, decode_transaction};
 use super::fetcher::RpcClient;
-use super::writer::{load_sync_state, save_sync_state, write_block, write_blocks, write_logs, write_txs};
+use super::writer::{
+    detect_gaps, get_block_hash, load_sync_state, save_sync_state, write_block, write_blocks,
+    write_logs, write_txs,
+};
 
 pub struct SyncEngine {
     pool: Pool,
@@ -143,6 +146,62 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Validate parent hash chain for a batch of blocks
+    /// Returns Ok(()) if chain is valid, Err with details if not
+    async fn validate_parent_chain(&self, blocks: &[crate::tempo::TempoBlock]) -> Result<()> {
+        if blocks.is_empty() {
+            return Ok(());
+        }
+
+        let first_block = &blocks[0];
+        let first_num = first_block.number_u64();
+
+        // Check parent hash against stored block (if not genesis)
+        if first_num > 0 {
+            if let Some(stored_hash) = get_block_hash(&self.pool, first_num - 1).await? {
+                let expected_parent: [u8; 32] = stored_hash
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Invalid stored hash length"))?;
+                if first_block.parent_hash.0 != expected_parent {
+                    return Err(anyhow::anyhow!(
+                        "Parent hash mismatch at block {}: expected {:?}, got {:?}",
+                        first_num,
+                        hex::encode(expected_parent),
+                        hex::encode(first_block.parent_hash.0)
+                    ));
+                }
+            }
+        }
+
+        // Validate internal chain continuity
+        for window in blocks.windows(2) {
+            if window[1].parent_hash != window[0].hash {
+                return Err(anyhow::anyhow!(
+                    "Internal chain break at block {}: parent_hash {:?} != prev hash {:?}",
+                    window[1].number_u64(),
+                    hex::encode(window[1].parent_hash.0),
+                    hex::encode(window[0].hash.0)
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Detect and fill any gaps in the indexed block sequence
+    pub async fn fill_gaps(&self) -> Result<usize> {
+        let gaps = detect_gaps(&self.pool).await?;
+        let mut filled = 0;
+
+        for (start, end) in gaps {
+            info!(from = start, to = end, "Filling gap");
+            self.sync_range(start, end).await?;
+            filled += (end - start + 1) as usize;
+        }
+
+        Ok(filled)
+    }
+
     /// Fetch and decode a range of blocks (used by pipelined sync)
     async fn fetch_range(
         &self,
@@ -159,6 +218,9 @@ impl SyncEngine {
             self.rpc.get_blocks_batch(from..=to),
             self.rpc.get_receipts_batch(from..=to)
         )?;
+
+        // Validate parent hash chain
+        self.validate_parent_chain(&blocks).await?;
 
         let block_timestamps: HashMap<u64, _> = blocks
             .iter()

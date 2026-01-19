@@ -267,3 +267,45 @@ pub async fn save_sync_state(pool: &Pool, state: &SyncState) -> Result<()> {
 
     Ok(())
 }
+
+/// Get block hash by block number (for parent hash validation)
+pub async fn get_block_hash(pool: &Pool, block_num: u64) -> Result<Option<Vec<u8>>> {
+    let conn = pool.get().await?;
+
+    let row = conn
+        .query_opt("SELECT hash FROM blocks WHERE num = $1", &[&(block_num as i64)])
+        .await?;
+
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Detect gaps in the block sequence
+/// Returns a list of (start, end) ranges that are missing
+pub async fn detect_gaps(pool: &Pool) -> Result<Vec<(u64, u64)>> {
+    let conn = pool.get().await?;
+
+    let rows = conn
+        .query(
+            r#"
+            WITH numbered AS (
+                SELECT num, LAG(num) OVER (ORDER BY num) as prev_num
+                FROM blocks
+            )
+            SELECT prev_num + 1 as gap_start, num - 1 as gap_end
+            FROM numbered
+            WHERE num - prev_num > 1
+            "#,
+            &[],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, i64>(0) as u64,
+                r.get::<_, i64>(1) as u64,
+            )
+        })
+        .collect())
+}
