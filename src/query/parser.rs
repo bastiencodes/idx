@@ -5,7 +5,7 @@ use sha3::{Digest, Keccak256};
 pub struct EventSignature {
     pub name: String,
     pub params: Vec<AbiParam>,
-    pub selector: [u8; 4],
+    pub topic0: [u8; 32],
 }
 
 impl EventSignature {
@@ -33,17 +33,17 @@ impl EventSignature {
 
         let canonical = Self::canonical_signature(&name, &params);
         let hash = Keccak256::digest(canonical.as_bytes());
-        let selector: [u8; 4] = hash[0..4].try_into().unwrap();
+        let topic0: [u8; 32] = hash.into();
 
         Ok(Self {
             name,
             params,
-            selector,
+            topic0,
         })
     }
 
-    pub fn selector_hex(&self) -> String {
-        hex::encode(self.selector)
+    pub fn topic0_hex(&self) -> String {
+        hex::encode(self.topic0)
     }
 
     fn canonical_signature(name: &str, params: &[AbiParam]) -> String {
@@ -86,11 +86,11 @@ impl EventSignature {
             r#""{name}" AS (
     SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address{select_clause}
     FROM logs
-    WHERE selector = '\x{selector}'
+    WHERE selector = '\x{topic0}'
 )"#,
             name = self.name,
             select_clause = select_clause,
-            selector = self.selector_hex(),
+            topic0 = self.topic0_hex(),
         )
     }
 }
@@ -308,14 +308,14 @@ mod tests {
         assert_eq!(sig.params[0].ty, AbiType::Address);
         assert_eq!(sig.params[1].ty, AbiType::Address);
         assert_eq!(sig.params[2].ty, AbiType::Uint(256));
-        assert_eq!(sig.selector_hex(), "ddf252ad");
+        assert!(sig.topic0_hex().starts_with("ddf252ad"));
     }
 
     #[test]
     fn test_parse_approval_signature() {
         let sig = EventSignature::parse("Approval(address,address,uint256)").unwrap();
         assert_eq!(sig.name, "Approval");
-        assert_eq!(sig.selector_hex(), "8c5be1e5");
+        assert!(sig.topic0_hex().starts_with("8c5be1e5"));
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(sig.params[1].name.as_deref(), Some("to"));
         assert!(!sig.params[2].indexed);
         assert_eq!(sig.params[2].name.as_deref(), Some("value"));
-        assert_eq!(sig.selector_hex(), "ddf252ad");
+        assert!(sig.topic0_hex().starts_with("ddf252ad"));
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
         assert!(cte.contains("abi_address(topics[2])"));
         assert!(cte.contains("abi_address(topics[3])"));
         assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))::text"));
-        assert!(cte.contains("ddf252ad"));
+        assert!(cte.contains("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"));
     }
 
     #[test]
