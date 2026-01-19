@@ -113,11 +113,12 @@ impl SyncEngine {
                 write_future.await?;
             }
 
-            // Update sync state
+            // Update sync state (preserve backfill_num)
             let new_state = SyncState {
                 chain_id: self.chain_id,
                 head_num: remote_head,
                 synced_num: current_to,
+                backfill_num: state.backfill_num,
             };
             save_sync_state(&self.pool, &new_state).await?;
 
@@ -284,6 +285,7 @@ impl SyncEngine {
             chain_id: self.chain_id,
             head_num: remote_head,
             synced_num: to,
+            backfill_num: state.backfill_num,
         };
         save_sync_state(&self.pool, &new_state).await?;
 
@@ -298,7 +300,7 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn sync_range(&self, from: u64, to: u64) -> Result<()> {
+    pub async fn sync_range(&self, from: u64, to: u64) -> Result<()> {
         // Fetch blocks and receipts in parallel (receipts contain logs)
         let (blocks, receipts) = tokio::try_join!(
             self.rpc.get_blocks_batch(from..=to),
@@ -372,13 +374,118 @@ impl SyncEngine {
             .collect();
         write_logs(&self.pool, &log_rows).await?;
 
+        // Update sync state
+        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
         let new_state = SyncState {
             chain_id: self.chain_id,
             head_num: num,
             synced_num: num,
+            backfill_num: state.backfill_num,
         };
         save_sync_state(&self.pool, &new_state).await?;
 
         Ok(())
+    }
+
+    /// Backfill blocks going backwards from a starting point toward genesis
+    /// Returns the number of blocks synced
+    pub async fn backfill(
+        &self,
+        from: u64,
+        to: u64,
+        batch_size: u64,
+        mut shutdown: broadcast::Receiver<()>,
+    ) -> Result<u64> {
+        if from < to {
+            return Err(anyhow::anyhow!(
+                "Backfill requires from ({}) >= to ({})",
+                from,
+                to
+            ));
+        }
+
+        let mut state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        
+        // Determine starting point for backfill
+        let start_block = match state.backfill_num {
+            Some(n) if n > to => n.saturating_sub(1), // Resume from where we left off
+            Some(n) if n <= to => {
+                info!(backfill_num = n, "Backfill already complete to target");
+                return Ok(0);
+            }
+            None => from, // First time, start from specified block
+            _ => from,
+        };
+
+        if start_block < to {
+            return Ok(0);
+        }
+
+        info!(
+            from = start_block,
+            to = to,
+            batch_size = batch_size,
+            "Starting backfill"
+        );
+
+        let mut synced = 0u64;
+        let mut current_end = start_block;
+
+        while current_end >= to {
+            // Check for shutdown
+            if shutdown.try_recv().is_ok() {
+                info!(stopped_at = current_end, "Backfill interrupted by shutdown");
+                break;
+            }
+
+            let current_start = current_end.saturating_sub(batch_size - 1).max(to);
+
+            // Sync the range (going backwards, but sync_range handles forward ordering)
+            self.sync_range(current_start, current_end).await?;
+
+            let batch_blocks = current_end - current_start + 1;
+            synced += batch_blocks;
+
+            // Update state with new backfill position
+            state.backfill_num = Some(current_start);
+            if state.chain_id == 0 {
+                state.chain_id = self.chain_id;
+            }
+            save_sync_state(&self.pool, &state).await?;
+
+            info!(
+                from = current_start,
+                to = current_end,
+                synced = synced,
+                remaining = current_start.saturating_sub(to),
+                "Backfilled batch"
+            );
+
+            if current_start == to {
+                break;
+            }
+            current_end = current_start.saturating_sub(1);
+        }
+
+        // Mark complete if we reached genesis
+        if state.backfill_num == Some(to) && to == 0 {
+            info!("Backfill complete to genesis");
+        }
+
+        Ok(synced)
+    }
+
+    /// Get current sync status
+    pub async fn status(&self) -> Result<SyncState> {
+        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        Ok(state)
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    pub fn pool(&self) -> &Pool {
+        &self.pool
     }
 }
