@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
 use tracing::info;
 
@@ -25,6 +26,10 @@ pub struct Args {
     /// HTTP API bind address
     #[arg(long, default_value = "0.0.0.0")]
     pub bind: String,
+
+    /// Metrics port (0 to disable)
+    #[arg(long, default_value = "9090")]
+    pub metrics_port: u16,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -32,6 +37,14 @@ pub async fn run(args: Args) -> Result<()> {
         rpc_url: args.rpc,
         database_url: args.db,
     };
+
+    if args.metrics_port > 0 {
+        let metrics_addr: SocketAddr = format!("{}:{}", args.bind, args.metrics_port).parse()?;
+        info!(addr = %metrics_addr, "Starting Prometheus metrics server");
+        PrometheusBuilder::new()
+            .with_http_listener(metrics_addr)
+            .install()?;
+    }
 
     info!("Connecting to database...");
     let pool = db::create_pool(&config.database_url).await?;

@@ -7,6 +7,7 @@ use tracing::{debug, error, info};
 
 use crate::config::chain_name;
 use crate::db::Pool;
+use crate::metrics;
 use crate::types::SyncState;
 
 use super::decoder::{decode_block, decode_log, decode_transaction};
@@ -122,12 +123,20 @@ impl SyncEngine {
             };
             save_sync_state(&self.pool, &new_state).await?;
 
-            let tx_count = all_txs.len();
-            let log_count = all_logs.len();
+            let block_count = blocks.len() as u64;
+            let tx_count = all_txs.len() as u64;
+            let log_count = all_logs.len() as u64;
+
+            metrics::record_blocks_indexed(block_count);
+            metrics::record_txs_indexed(tx_count);
+            metrics::record_logs_indexed(log_count);
+            metrics::set_sync_head(current_to);
+            metrics::set_sync_lag(remote_head.saturating_sub(current_to));
+
             debug!(
                 from = current_from,
                 to = current_to,
-                blocks = blocks.len(),
+                blocks = block_count,
                 txs = tx_count,
                 logs = log_count,
                 "Wrote batch"
@@ -452,6 +461,9 @@ impl SyncEngine {
                 state.chain_id = self.chain_id;
             }
             save_sync_state(&self.pool, &state).await?;
+
+            metrics::record_blocks_indexed(batch_blocks);
+            metrics::set_backfill_progress(current_start);
 
             info!(
                 from = current_start,

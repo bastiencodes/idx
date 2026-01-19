@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
-
-use crate::tempo::{TempoBlock, TempoLog, TempoReceipt};
-
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use crate::metrics;
+use crate::tempo::{TempoBlock, TempoLog, TempoReceipt};
 
 #[derive(Clone)]
 pub struct RpcClient {
@@ -246,15 +247,20 @@ impl RpcClient {
             params,
         };
 
-        let resp = self
+        let start = Instant::now();
+        let result = self
             .client
             .post(&self.url)
             .json(&req)
             .send()
             .await?
             .json()
-            .await?;
+            .await;
 
-        Ok(resp)
+        let duration = start.elapsed();
+        let success = result.is_ok();
+        metrics::record_rpc_request(method, duration, success);
+
+        Ok(result?)
     }
 }

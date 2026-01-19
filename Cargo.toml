@@ -42,6 +42,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 
 # Crypto
 sha3 = "0.10"

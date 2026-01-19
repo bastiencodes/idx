@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::time::Instant;
 
 use crate::db::Pool;
+use crate::metrics;
 use crate::query::EventSignature;
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +112,7 @@ pub async fn execute_query(
     )
     .await?;
 
+    let start = Instant::now();
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(options.timeout_ms + 100),
         conn.query(&sql, &[]),
@@ -117,7 +120,10 @@ pub async fn execute_query(
     .await;
 
     let rows = match result {
-        Ok(Ok(rows)) => rows,
+        Ok(Ok(rows)) => {
+            metrics::record_query_duration(start.elapsed());
+            rows
+        }
         Ok(Err(e)) => return Err(anyhow!("Query error: {}", e)),
         Err(_) => return Err(anyhow!("Query timeout")),
     };
@@ -132,6 +138,7 @@ pub async fn execute_query(
 
     let columns: Vec<String> = rows[0].columns().iter().map(|c| c.name().to_string()).collect();
     let row_count = rows.len();
+    metrics::record_query_rows(row_count as u64);
 
     let result_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()

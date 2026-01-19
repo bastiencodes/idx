@@ -72,6 +72,9 @@ curl -X POST http://localhost:8080/query \
 
 # Query decoded event logs
 curl "http://localhost:8080/logs/Transfer(address,address,uint256)?limit=10&after=1h"
+
+# Prometheus metrics (default port 9090)
+curl http://localhost:9090/metrics
 ```
 
 ### Benchmarks
