@@ -22,4 +22,6 @@ pub struct TempoReceipt {
     pub status: Option<U64>,
     #[serde(default)]
     pub effective_gas_price: Option<U256>,
+    #[serde(default)]
+    pub fee_payer: Option<Address>,
 }

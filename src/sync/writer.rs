@@ -5,7 +5,7 @@ use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::Type;
 
 use crate::db::Pool;
-use crate::types::{BlockRow, LogRow, SyncState, TxRow};
+use crate::types::{BlockRow, LogRow, ReceiptRow, SyncState, TxRow};
 
 pub async fn write_block(pool: &Pool, block: &BlockRow) -> Result<()> {
     write_blocks(pool, std::slice::from_ref(block)).await
@@ -219,6 +219,79 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     conn.execute(
         &format!("INSERT INTO logs SELECT * FROM {} ON CONFLICT (block_num, log_idx) DO NOTHING", staging_table),
+        &[],
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Batch insert receipts using COPY for maximum throughput
+pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> {
+    if receipts.is_empty() {
+        return Ok(());
+    }
+
+    let conn = pool.get().await?;
+
+    conn.execute(
+        "CREATE UNLOGGED TABLE IF NOT EXISTS receipts_staging (LIKE receipts INCLUDING DEFAULTS)",
+        &[],
+    )
+    .await?;
+
+    conn.execute("TRUNCATE receipts_staging", &[]).await?;
+
+    let types = &[
+        Type::INT8,        // block_num
+        Type::TIMESTAMPTZ, // block_timestamp
+        Type::INT4,        // tx_idx
+        Type::BYTEA,       // tx_hash
+        Type::BYTEA,       // from
+        Type::BYTEA,       // to
+        Type::BYTEA,       // contract_address
+        Type::INT8,        // gas_used
+        Type::INT8,        // cumulative_gas_used
+        Type::TEXT,        // effective_gas_price
+        Type::INT2,        // status
+        Type::BYTEA,       // fee_payer
+    ];
+
+    let sink = conn
+        .copy_in(
+            r#"COPY receipts_staging (block_num, block_timestamp, tx_idx, tx_hash, "from", "to",
+                contract_address, gas_used, cumulative_gas_used, effective_gas_price,
+                status, fee_payer) FROM STDIN BINARY"#,
+        )
+        .await?;
+
+    let writer = BinaryCopyInWriter::new(sink, types);
+    let mut pinned_writer: Pin<Box<BinaryCopyInWriter>> = Box::pin(writer);
+
+    for receipt in receipts {
+        pinned_writer
+            .as_mut()
+            .write(&[
+                &receipt.block_num,
+                &receipt.block_timestamp,
+                &receipt.tx_idx,
+                &receipt.tx_hash,
+                &receipt.from,
+                &receipt.to,
+                &receipt.contract_address,
+                &receipt.gas_used,
+                &receipt.cumulative_gas_used,
+                &receipt.effective_gas_price,
+                &receipt.status,
+                &receipt.fee_payer,
+            ])
+            .await?;
+    }
+
+    pinned_writer.as_mut().finish().await?;
+
+    conn.execute(
+        "INSERT INTO receipts SELECT * FROM receipts_staging ON CONFLICT (block_num, tx_idx) DO NOTHING",
         &[],
     )
     .await?;

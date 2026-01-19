@@ -1,0 +1,27 @@
+-- Receipts table for transaction execution results
+-- Partitioned by block range (2M blocks per partition)
+CREATE TABLE IF NOT EXISTS receipts (
+    block_num               INT8 NOT NULL,
+    block_timestamp         TIMESTAMPTZ NOT NULL,
+    tx_idx                  INT4 NOT NULL,
+    tx_hash                 BYTEA NOT NULL,
+    "from"                  BYTEA NOT NULL,
+    "to"                    BYTEA,
+    contract_address        BYTEA,
+    gas_used                INT8 NOT NULL,
+    cumulative_gas_used     INT8 NOT NULL,
+    effective_gas_price     TEXT,
+    status                  INT2,
+    fee_payer               BYTEA,
+    PRIMARY KEY (block_num, tx_idx)
+) PARTITION BY RANGE (block_num);
+
+-- Default partition for initial development (covers 0-2M)
+CREATE TABLE IF NOT EXISTS receipts_b0m PARTITION OF receipts
+    FOR VALUES FROM (0) TO (2000000);
+
+-- Receipt lookups
+CREATE INDEX IF NOT EXISTS idx_receipts_tx_hash ON receipts (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_receipts_from ON receipts ("from", block_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_receipts_fee_payer ON receipts (fee_payer, block_timestamp DESC) WHERE fee_payer IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_receipts_contract_address ON receipts (contract_address) WHERE contract_address IS NOT NULL;
