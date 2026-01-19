@@ -1,11 +1,14 @@
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use metrics_exporter_prometheus::PrometheusBuilder;
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use tracing::info;
 
 use ak47::api;
+use ak47::broadcast::Broadcaster;
 use ak47::config::Config;
 use ak47::db;
 use ak47::sync::engine::SyncEngine;
@@ -41,6 +44,7 @@ pub async fn run(args: Args) -> Result<()> {
     info!("Running migrations...");
     db::run_migrations(&pool).await?;
 
+    let broadcaster = Arc::new(Broadcaster::new());
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel(1);
 
     tokio::spawn({
@@ -54,7 +58,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     if config.http.enabled {
         let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
-        let router = api::router(pool.clone());
+        let router = api::router(pool.clone(), broadcaster.clone());
 
         info!(addr = %addr, "Starting HTTP API server");
 
@@ -77,6 +81,7 @@ pub async fn run(args: Args) -> Result<()> {
     for chain in &config.chains {
         let pool = pool.clone();
         let chain = chain.clone();
+        let broadcaster = broadcaster.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let backfill_shutdown_rx = shutdown_tx.subscribe();
 
@@ -140,8 +145,10 @@ pub async fn run(args: Args) -> Result<()> {
                 }
             }
 
-            // Run forward sync
-            let mut engine = SyncEngine::new(pool, &chain.rpc_url).await?;
+            // Run forward sync with broadcaster for live updates
+            let mut engine = SyncEngine::new(pool, &chain.rpc_url)
+                .await?
+                .with_broadcaster(broadcaster);
             engine.run(shutdown_rx).await
         });
 

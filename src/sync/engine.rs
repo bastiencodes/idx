@@ -1,9 +1,11 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
+use crate::broadcast::{BlockUpdate, Broadcaster};
 use crate::db::Pool;
 use crate::metrics::{self, SyncProgress};
 use crate::types::SyncState;
@@ -19,6 +21,7 @@ pub struct SyncEngine {
     pool: Pool,
     rpc: RpcClient,
     chain_id: u64,
+    broadcaster: Option<Arc<Broadcaster>>,
 }
 
 impl SyncEngine {
@@ -32,7 +35,13 @@ impl SyncEngine {
             pool,
             rpc,
             chain_id,
+            broadcaster: None,
         })
+    }
+
+    pub fn with_broadcaster(mut self, broadcaster: Arc<Broadcaster>) -> Self {
+        self.broadcaster = Some(broadcaster);
+        self
     }
 
     pub async fn run(&mut self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
@@ -130,6 +139,20 @@ impl SyncEngine {
             metrics::record_txs_indexed(self.chain_id, tx_count);
             metrics::record_logs_indexed(self.chain_id, log_count);
             progress.report_forward(current_to, remote_head, block_count);
+
+            // Broadcast updates for each block in the batch
+            if let Some(ref broadcaster) = self.broadcaster {
+                for block in &blocks {
+                    broadcaster.send(BlockUpdate {
+                        chain_id: self.chain_id,
+                        block_num: block.number_u64(),
+                        block_hash: format!("0x{}", hex::encode(block.hash.0)),
+                        tx_count: block.transactions().count() as u64,
+                        log_count: log_count / block_count.max(1),
+                        timestamp: block.timestamp_u64() as i64,
+                    });
+                }
+            }
 
             debug!(
                 from = current_from,

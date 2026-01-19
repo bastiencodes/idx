@@ -1,29 +1,38 @@
+use std::convert::Infallible;
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event as SseEvent, KeepAlive},
+        IntoResponse, Response, Sse,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::broadcast::Broadcaster;
 use crate::db::Pool;
 use crate::service::{QueryOptions, QueryResult, SyncStatus};
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Pool,
+    pub broadcaster: Arc<Broadcaster>,
 }
 
-pub fn router(pool: Pool) -> Router {
-    let state = AppState { pool };
+pub fn router(pool: Pool, broadcaster: Arc<Broadcaster>) -> Router {
+    let state = AppState { pool, broadcaster };
 
     Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
-        .route("/query", post(handle_query))
+        .route("/query", post(handle_query).get(handle_query_live_get))
         .route("/logs/{signature}", get(handle_logs))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -77,9 +86,27 @@ struct QueryResponse {
     ok: bool,
 }
 
+#[derive(Deserialize)]
+pub struct QueryParams {
+    #[serde(default)]
+    live: bool,
+}
+
 async fn handle_query(
     State(state): State<AppState>,
+    Query(params): Query<QueryParams>,
     Json(req): Json<QueryRequest>,
+) -> Response {
+    if params.live {
+        handle_query_live(state, req).await.into_response()
+    } else {
+        handle_query_once(state, req).await.into_response()
+    }
+}
+
+async fn handle_query_once(
+    state: AppState,
+    req: QueryRequest,
 ) -> Result<Json<QueryResponse>, ApiError> {
     let options = QueryOptions {
         timeout_ms: req.timeout_ms.clamp(100, 30000), // 100ms - 30s
@@ -105,6 +132,96 @@ async fn handle_query(
     })?;
 
     Ok(Json(QueryResponse { result, ok: true }))
+}
+
+async fn handle_query_live(
+    state: AppState,
+    req: QueryRequest,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let mut rx = state.broadcaster.subscribe();
+    let pool = state.pool;
+    let sql = req.sql;
+    let signature = req.signature;
+    let options = QueryOptions {
+        timeout_ms: req.timeout_ms.clamp(100, 30000),
+        limit: req.limit.clamp(1, 100000),
+    };
+
+    let stream = async_stream::stream! {
+        // Execute initial query
+        match crate::service::execute_query(&pool, &sql, signature.as_deref(), &options).await {
+            Ok(result) => {
+                yield Ok(SseEvent::default()
+                    .event("result")
+                    .json_data(QueryResponse { result, ok: true })
+                    .unwrap());
+            }
+            Err(e) => {
+                yield Ok(SseEvent::default()
+                    .event("error")
+                    .json_data(serde_json::json!({ "ok": false, "error": e.to_string() }))
+                    .unwrap());
+                return;
+            }
+        }
+
+        // Stream updates on each new block
+        loop {
+            match rx.recv().await {
+                Ok(_update) => {
+                    match crate::service::execute_query(&pool, &sql, signature.as_deref(), &options).await {
+                        Ok(result) => {
+                            yield Ok(SseEvent::default()
+                                .event("result")
+                                .json_data(QueryResponse { result, ok: true })
+                                .unwrap());
+                        }
+                        Err(e) => {
+                            yield Ok(SseEvent::default()
+                                .event("error")
+                                .json_data(serde_json::json!({ "ok": false, "error": e.to_string() }))
+                                .unwrap());
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    yield Ok(SseEvent::default()
+                        .event("lagged")
+                        .json_data(serde_json::json!({ "skipped": n }))
+                        .unwrap());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(Deserialize)]
+pub struct QueryLiveGetParams {
+    sql: String,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default = "default_timeout")]
+    timeout_ms: u64,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+async fn handle_query_live_get(
+    State(state): State<AppState>,
+    Query(params): Query<QueryLiveGetParams>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let req = QueryRequest {
+        sql: params.sql,
+        signature: params.signature,
+        timeout_ms: params.timeout_ms,
+        limit: params.limit,
+    };
+    handle_query_live(state, req).await
 }
 
 #[derive(Deserialize)]
