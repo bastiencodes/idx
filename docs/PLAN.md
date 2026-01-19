@@ -1120,15 +1120,21 @@ cargo run -- query "
 
 ---
 
-### Phase 4: Query Engine + JIT Selectors
+### Phase 4: Query Engine + JIT Selectors ✅
 **Duration**: 3-5 days  
+**Status**: Complete  
 **Deliverable**: Query logs by event signature with automatic decoding
 
 #### What You Get
 - `ak47 query-logs "Transfer(address,address,uint256)" --after 1h`
 - JIT signature → selector conversion
 - ABI decoding SQL functions (golden-axe pattern)
-- Prepared statement cache
+
+#### Implementation (Completed)
+- Created `migrations/007_abi_functions.sql` with abi_uint, abi_int, abi_address, abi_bool, abi_bytes, abi_string
+- Created `src/query/parser.rs` with EventSignature::parse() and CTE generation
+- Created `src/cli/query_logs.rs` with --after, --limit, --address, --format options
+- Added integration tests in `tests/query_test.rs`
 
 #### Implementation Tasks
 
