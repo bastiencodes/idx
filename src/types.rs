@@ -81,18 +81,36 @@ impl SyncState {
         self.backfill_num == Some(0)
     }
 
+    /// Returns true if backfill has started
+    pub fn backfill_started(&self) -> bool {
+        self.backfill_num.is_some()
+    }
+
     /// Returns the number of blocks remaining to backfill
     pub fn backfill_remaining(&self) -> u64 {
         match self.backfill_num {
-            None => self.synced_num, // Haven't started, everything below synced_num
-            Some(0) => 0,            // Complete
-            Some(n) => n,            // Blocks 0..n remain
+            None => self.synced_num.saturating_sub(1), // Haven't started, need to fill 0..(synced-1)
+            Some(0) => 0,                              // Complete
+            Some(n) => n,                              // Blocks 0..n remain
         }
     }
 
-    /// Returns total indexed block count (handles gaps)
+    /// Returns the indexed range (low, high).
+    /// Forward sync starts at chain head; backfill fills history.
     pub fn indexed_range(&self) -> (u64, u64) {
-        let low = self.backfill_num.unwrap_or(self.synced_num);
-        (low, self.synced_num)
+        match self.backfill_num {
+            Some(n) => (n, self.synced_num),          // Backfill in progress or complete
+            None => (self.synced_num, self.synced_num), // Only forward sync, just head
+        }
+    }
+
+    /// Returns total number of indexed blocks
+    pub fn total_indexed(&self) -> u64 {
+        let (low, high) = self.indexed_range();
+        if high >= low {
+            high - low + 1
+        } else {
+            0
+        }
     }
 }

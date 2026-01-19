@@ -63,10 +63,11 @@ impl SyncEngine {
         let state = load_sync_state(&self.pool).await?.unwrap_or_default();
         let remote_head = self.rpc.latest_block_number().await?;
 
-        let synced = if state.chain_id == self.chain_id {
+        // If first sync for this chain, start at head (backfill handles history)
+        let synced = if state.chain_id == self.chain_id && state.synced_num > 0 {
             state.synced_num
         } else {
-            0
+            remote_head.saturating_sub(1) // Start at head-1 so we sync head block
         };
 
         if synced >= remote_head {
@@ -481,6 +482,11 @@ impl SyncEngine {
     pub async fn status(&self) -> Result<SyncState> {
         let state = load_sync_state(&self.pool).await?.unwrap_or_default();
         Ok(state)
+    }
+
+    /// Get current chain head from RPC
+    pub async fn get_head(&self) -> Result<u64> {
+        self.rpc.latest_block_number().await
     }
 
     pub fn chain_id(&self) -> u64 {

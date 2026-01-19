@@ -99,15 +99,42 @@ pub async fn run(args: Args) -> Result<()> {
                     let backfill_engine = SyncEngine::new(pool.clone(), &chain.rpc_url).await?;
 
                     let batch_size = chain.batch_size;
+                    let compress_pool = pool.clone();
                     tokio::spawn(async move {
-                        let state = backfill_engine.status().await.unwrap_or_default();
-                        let start = state.backfill_num.unwrap_or(state.synced_num);
+                        // Get chain head from RPC (don't rely on state which may not be set yet)
+                        let head = match backfill_engine.get_head().await {
+                            Ok(h) => h,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to get chain head for backfill");
+                                return;
+                            }
+                        };
 
-                        if let Err(e) = backfill_engine
+                        let state = backfill_engine.status().await.unwrap_or_default();
+                        // Resume from backfill position, or start from head if fresh
+                        let start = state.backfill_num.unwrap_or(head.saturating_sub(1));
+
+                        if start == 0 {
+                            info!("Backfill already complete");
+                            return;
+                        }
+
+                        info!(start = start, target = 0, "Backfill starting from head");
+
+                        match backfill_engine
                             .backfill(start, 0, batch_size, backfill_shutdown_rx)
                             .await
                         {
-                            tracing::error!(error = %e, "Backfill failed");
+                            Ok(synced) if synced > 0 => {
+                                info!(blocks = synced, "Backfill complete, starting compression");
+                                if let Err(e) = ak47::db::compress_historical_chunks(&compress_pool).await {
+                                    tracing::error!(error = %e, "Compression failed");
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!(error = %e, "Backfill failed");
+                            }
                         }
                     });
                 }

@@ -35,28 +35,47 @@ docker pull ghcr.io/tempoxyz/ak47:latest
 
 | Command | Description |
 |---------|-------------|
-| `ak47 up` | Start continuous sync from chain head (realtime) |
-| `ak47 status` | Show sync status, coverage, and gaps |
-| `ak47 sync backfill` | Backfill blocks from head toward genesis |
-| `ak47 sync status` | Show sync status (same as `ak47 status`) |
+| `ak47 up` | Start continuous sync + backfill + HTTP API |
+| `ak47 status` | Show sync status, coverage, and backfill progress |
 | `ak47 query` | Run SQL queries against indexed data |
-| `ak47 compress` | Compress TimescaleDB chunks and refresh aggregates |
 
-### Sync Commands
+### How Sync Works
+
+ak47 uses a **bidirectional sync** strategy:
+
+1. **Forward sync** - Starts at chain head and follows new blocks in realtime
+2. **Backfill** - Runs in background, filling history from head → genesis
+3. **Compression** - Automatically compresses historical chunks after backfill completes
+
+```
+Chain:    [0]----[1]----[2]----...----[HEAD-1]----[HEAD]----[HEAD+1]
+                   ◄── Backfill ──┘              └── Forward ──►
+```
+
+This means you get **realtime data immediately** while historical data fills in.
+
+### Running
 
 ```bash
-# Follow chain head continuously
-ak47 up --rpc <RPC_URL> --db <DB_URL>
+# Start with config file (recommended)
+ak47 up --config config.toml
 
-# Backfill to genesis (resumes if interrupted)
-ak47 sync --rpc <RPC_URL> --db <DB_URL> backfill --to 0
-
-# Backfill from specific block
-ak47 sync --rpc <RPC_URL> --db <DB_URL> backfill --from 10000 --to 0
+# Or with CLI args
+ak47 up --rpc https://rpc.moderato.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47
 
 # Check sync progress
-ak47 sync --rpc <RPC_URL> --db <DB_URL> status
+ak47 status --db postgres://ak47:ak47@localhost:5432/ak47
 ```
+
+### Backfill & Compression
+
+Backfill is enabled by default (`backfill = true` in config). When backfill completes:
+
+1. All blocks from genesis to head are indexed
+2. **Compression runs automatically** - historical chunks are compressed for faster queries
+3. Forward sync continues following new blocks
+
+Compression provides **10-20x storage savings** and **faster aggregation queries** on historical data.
 
 ### Query Commands
 

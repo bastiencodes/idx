@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS blocks (
     PRIMARY KEY (num)
 );
 
--- Convert to hypertable with 2M block chunks (only if not already a hypertable)
+-- Convert to hypertable with 500K block chunks (~6 days at 1 blk/s)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'blocks') 
        AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_partitioned_table pt ON c.oid = pt.partrelid WHERE c.relname = 'blocks') THEN
-        PERFORM create_hypertable('blocks', by_range('num', 2000000));
+        PERFORM create_hypertable('blocks', by_range('num', 500000));
     END IF;
 END $$;
 
@@ -36,7 +36,7 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_blocks_hash ON blocks (hash);
 CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks (timestamp DESC);
 
--- Enable compression (idempotent - ALTER TABLE SET is safe to re-run)
+-- Enable compression (no automatic policy - use `ak47 compress` after backfill)
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'blocks') THEN
@@ -44,7 +44,6 @@ BEGIN
             timescaledb.compress,
             timescaledb.compress_orderby = 'num DESC'
         );
-        PERFORM add_compression_policy('blocks', 2000000, if_not_exists => TRUE);
     END IF;
 END $$;
 
@@ -78,12 +77,12 @@ CREATE TABLE IF NOT EXISTS txs (
     PRIMARY KEY (block_num, idx)
 );
 
--- Convert to hypertable (only if not already a hypertable or partitioned)
+-- Convert to hypertable with 500K block chunks
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') 
        AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_partitioned_table pt ON c.oid = pt.partrelid WHERE c.relname = 'txs') THEN
-        PERFORM create_hypertable('txs', by_range('block_num', 2000000));
+        PERFORM create_hypertable('txs', by_range('block_num', 500000));
     END IF;
 END $$;
 
@@ -92,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_txs_hash ON txs (hash);
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
 
--- Enable compression (only if hypertable)
+-- Enable compression (no automatic policy - use `ak47 compress` after backfill)
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') THEN
@@ -101,7 +100,6 @@ BEGIN
             timescaledb.compress_segmentby = 'type',
             timescaledb.compress_orderby = 'block_num DESC, idx'
         );
-        PERFORM add_compression_policy('txs', 2000000, if_not_exists => TRUE);
     END IF;
 END $$;
 
@@ -122,12 +120,12 @@ CREATE TABLE IF NOT EXISTS logs (
     PRIMARY KEY (block_num, log_idx)
 );
 
--- Convert to hypertable (only if not already a hypertable or partitioned)
+-- Convert to hypertable with 500K block chunks
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'logs') 
        AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_partitioned_table pt ON c.oid = pt.partrelid WHERE c.relname = 'logs') THEN
-        PERFORM create_hypertable('logs', by_range('block_num', 2000000));
+        PERFORM create_hypertable('logs', by_range('block_num', 500000));
     END IF;
 END $$;
 
@@ -135,7 +133,7 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_logs_selector ON logs (selector, block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_address ON logs (address, block_timestamp DESC);
 
--- Enable compression (segment by selector for event queries)
+-- Enable compression (no automatic policy - use `ak47 compress` after backfill)
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'logs') THEN
@@ -144,7 +142,6 @@ BEGIN
             timescaledb.compress_segmentby = 'selector',
             timescaledb.compress_orderby = 'block_num DESC, log_idx'
         );
-        PERFORM add_compression_policy('logs', 2000000, if_not_exists => TRUE);
     END IF;
 END $$;
 

@@ -74,10 +74,15 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
             println!("│");
 
             // Backfill status
+            let remaining = state.backfill_remaining();
             println!("│  Backfill");
             match state.backfill_num {
+                None if remaining > 0 => {
+                    println!("│  ├─ Status:   Pending");
+                    println!("│  └─ Needed:   {} blocks (0 → {})", format_number(remaining), state.synced_num.saturating_sub(1));
+                }
                 None => {
-                    println!("│  └─ Status:   Not started");
+                    println!("│  └─ Status:   Not needed");
                 }
                 Some(0) => {
                     println!("│  └─ Status:   ✓ Complete (genesis reached)");
@@ -91,19 +96,18 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
                         0
                     };
                     println!("│  ├─ Status:   In progress");
-                    println!("│  ├─ Position: block {}", n);
-                    println!("│  ├─ Remaining: {} blocks", n);
+                    println!("│  ├─ Position: block {}", format_number(n));
+                    println!("│  ├─ Remaining: {} blocks", format_number(n));
                     println!("│  └─ Progress: {}%", pct);
                 }
             }
 
             // Coverage
             let (low, high) = state.indexed_range();
-            let total_indexed = if high >= low { high - low + 1 } else { 0 };
             println!("│");
             println!("│  Coverage");
-            println!("│  ├─ Range:    {} - {}", low, high);
-            println!("│  └─ Total:    {} blocks", format_number(total_indexed));
+            println!("│  ├─ Range:    {} → {}", format_number(low), format_number(high));
+            println!("│  └─ Total:    {} blocks", format_number(state.total_indexed()));
         } else {
             println!("│  Status: Not syncing");
             if let Some(head) = live_head {
