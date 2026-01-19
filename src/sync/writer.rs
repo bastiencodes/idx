@@ -232,7 +232,7 @@ pub async fn load_sync_state(pool: &Pool) -> Result<Option<SyncState>> {
 
     let row = conn
         .query_opt(
-            "SELECT chain_id, head_num, synced_num FROM sync_state WHERE id = 1",
+            "SELECT chain_id, head_num, synced_num, backfill_num FROM sync_state WHERE id = 1",
             &[],
         )
         .await?;
@@ -241,6 +241,7 @@ pub async fn load_sync_state(pool: &Pool) -> Result<Option<SyncState>> {
         chain_id: r.get::<_, i64>(0) as u64,
         head_num: r.get::<_, i64>(1) as u64,
         synced_num: r.get::<_, i64>(2) as u64,
+        backfill_num: r.get::<_, Option<i64>>(3).map(|n| n as u64),
     }))
 }
 
@@ -249,18 +250,20 @@ pub async fn save_sync_state(pool: &Pool, state: &SyncState) -> Result<()> {
 
     conn.execute(
         r#"
-        INSERT INTO sync_state (id, chain_id, head_num, synced_num, updated_at)
-        VALUES (1, $1, $2, $3, NOW())
+        INSERT INTO sync_state (id, chain_id, head_num, synced_num, backfill_num, updated_at)
+        VALUES (1, $1, $2, $3, $4, NOW())
         ON CONFLICT (id) DO UPDATE SET
             chain_id = EXCLUDED.chain_id,
             head_num = EXCLUDED.head_num,
             synced_num = EXCLUDED.synced_num,
+            backfill_num = EXCLUDED.backfill_num,
             updated_at = NOW()
         "#,
         &[
             &(state.chain_id as i64),
             &(state.head_num as i64),
             &(state.synced_num as i64),
+            &state.backfill_num.map(|n| n as i64),
         ],
     )
     .await?;

@@ -56,8 +56,12 @@ pub struct LogRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncState {
     pub chain_id: u64,
+    /// Remote chain head block number
     pub head_num: u64,
+    /// Highest block synced (forward direction)
     pub synced_num: u64,
+    /// Lowest block synced going backwards (None = not started, Some(0) = complete)
+    pub backfill_num: Option<u64>,
 }
 
 impl Default for SyncState {
@@ -66,6 +70,29 @@ impl Default for SyncState {
             chain_id: 0,
             head_num: 0,
             synced_num: 0,
+            backfill_num: None,
         }
+    }
+}
+
+impl SyncState {
+    /// Returns true if backfill is complete (reached genesis)
+    pub fn backfill_complete(&self) -> bool {
+        self.backfill_num == Some(0)
+    }
+
+    /// Returns the number of blocks remaining to backfill
+    pub fn backfill_remaining(&self) -> u64 {
+        match self.backfill_num {
+            None => self.synced_num, // Haven't started, everything below synced_num
+            Some(0) => 0,            // Complete
+            Some(n) => n,            // Blocks 0..n remain
+        }
+    }
+
+    /// Returns total indexed block count (handles gaps)
+    pub fn indexed_range(&self) -> (u64, u64) {
+        let low = self.backfill_num.unwrap_or(self.synced_num);
+        (low, self.synced_num)
     }
 }

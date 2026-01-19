@@ -12,6 +12,18 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
     ))
     .await?;
 
+    info!("Running ABI function migrations");
+    conn.batch_execute(include_str!(
+        "../../migrations/007_abi_functions.sql"
+    ))
+    .await?;
+
+    info!("Running backfill tracking migration");
+    conn.batch_execute(include_str!(
+        "../../migrations/008_backfill_tracking.sql"
+    ))
+    .await?;
+
     Ok(())
 }
 
