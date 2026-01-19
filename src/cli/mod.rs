@@ -1,5 +1,6 @@
 pub mod compress;
 pub mod query;
+pub mod serve;
 pub mod status;
 pub mod sync;
 pub mod up;
@@ -16,8 +17,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start syncing blocks from the chain (continuous)
+    /// Start syncing blocks from the chain (continuous) and serve HTTP API
     Up(up::Args),
+    /// Serve HTTP API only (no syncing)
+    Serve(serve::Args),
     /// Show sync status
     Status(status::Args),
     /// Sync a specific block range
