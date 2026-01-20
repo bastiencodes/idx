@@ -1,3 +1,4 @@
+pub mod materialize;
 pub mod query;
 pub mod status;
 pub mod up;
@@ -20,4 +21,6 @@ pub enum Commands {
     Status(status::Args),
     /// Run a SQL query (use --signature to decode event logs)
     Query(query::Args),
+    /// Manage continuous aggregates (materialized views)
+    Materialize(materialize::Args),
 }

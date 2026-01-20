@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY migrations ./migrations
+COPY db ./db
 COPY benches ./benches
 
 RUN cargo build --release
@@ -22,6 +22,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ak47 /usr/local/bin/
-COPY --from=builder /app/migrations /migrations
+COPY --from=builder /app/db /db
 
 ENTRYPOINT ["ak47"]

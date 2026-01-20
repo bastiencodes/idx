@@ -36,7 +36,7 @@ pub async fn write_blocks(pool: &Pool, blocks: &[BlockRow]) -> Result<()> {
         )?;
     }
 
-    query.push_str(" ON CONFLICT (num) DO NOTHING");
+    query.push_str(" ON CONFLICT (timestamp, num) DO NOTHING");
 
     // Collect params - need to store values to extend lifetime
     let param_values: Vec<_> = blocks
@@ -150,7 +150,7 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
     pinned_writer.as_mut().finish().await?;
 
     conn.execute(
-        &format!(r#"INSERT INTO txs SELECT * FROM {staging_table} ON CONFLICT (block_num, idx) DO NOTHING"#),
+        &format!(r#"INSERT INTO txs SELECT * FROM {staging_table} ON CONFLICT (block_timestamp, block_num, idx) DO NOTHING"#),
         &[],
     )
     .await?;
@@ -218,7 +218,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
     pinned_writer.as_mut().finish().await?;
 
     conn.execute(
-        &format!("INSERT INTO logs SELECT * FROM {staging_table} ON CONFLICT (block_num, log_idx) DO NOTHING"),
+        &format!("INSERT INTO logs SELECT * FROM {staging_table} ON CONFLICT (block_timestamp, block_num, log_idx) DO NOTHING"),
         &[],
     )
     .await?;
@@ -291,7 +291,7 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
     pinned_writer.as_mut().finish().await?;
 
     conn.execute(
-        "INSERT INTO receipts SELECT * FROM receipts_staging ON CONFLICT (block_num, tx_idx) DO NOTHING",
+        "INSERT INTO receipts SELECT * FROM receipts_staging ON CONFLICT (block_timestamp, block_num, tx_idx) DO NOTHING",
         &[],
     )
     .await?;
@@ -349,9 +349,9 @@ pub async fn save_sync_state(pool: &Pool, state: &SyncState) -> Result<()> {
         INSERT INTO sync_state (chain_id, head_num, synced_num, backfill_num, started_at, updated_at)
         VALUES ($1, $2, $3, $4, COALESCE($5, NOW()), NOW())
         ON CONFLICT (chain_id) DO UPDATE SET
-            head_num = EXCLUDED.head_num,
-            synced_num = EXCLUDED.synced_num,
-            backfill_num = EXCLUDED.backfill_num,
+            head_num = GREATEST(sync_state.head_num, EXCLUDED.head_num),
+            synced_num = GREATEST(sync_state.synced_num, EXCLUDED.synced_num),
+            backfill_num = COALESCE(EXCLUDED.backfill_num, sync_state.backfill_num),
             started_at = COALESCE(sync_state.started_at, EXCLUDED.started_at),
             updated_at = NOW()
         "#,
