@@ -4,9 +4,6 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Database connection URL
-    pub database_url: String,
-
     /// HTTP API settings
     #[serde(default)]
     pub http: HttpConfig,
@@ -96,6 +93,9 @@ pub struct ChainConfig {
 
     /// RPC URL
     pub rpc_url: String,
+
+    /// Database connection URL for this chain
+    pub database_url: String,
 
     /// Enable backfill to genesis (default: true)
     #[serde(default = "default_backfill")]

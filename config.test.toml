@@ -1,7 +1,5 @@
 # AK47 Test Configuration
 
-database_url = "postgres://ak47:ak47@timescaledb:5432/ak47"
-
 [http]
 enabled = true
 port = 8080
@@ -15,5 +13,6 @@ port = 9090
 name = "dev"
 chain_id = 1337
 rpc_url = "http://tempo:8545"
+database_url = "postgres://ak47:ak47@timescaledb:5432/ak47"
 backfill = true
 batch_size = 100

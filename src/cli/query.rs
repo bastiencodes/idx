@@ -19,9 +19,9 @@ pub struct Args {
     #[arg(long, short)]
     pub signature: Option<String>,
 
-    /// Filter by chain ID (future: when multi-chain tables exist)
+    /// Chain name to query (uses first chain if not specified)
     #[arg(long)]
-    pub chain_id: Option<u64>,
+    pub chain: Option<String>,
 
     /// Output format (table, json, csv)
     #[arg(long, default_value = "table")]
@@ -38,7 +38,22 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     let config = Config::load(&args.config)?;
-    let pool = db::create_pool(&config.database_url).await?;
+
+    // Find chain by name, or use first chain
+    let chain = if let Some(name) = &args.chain {
+        config
+            .chains
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow::anyhow!("Chain '{}' not found in config", name))?
+    } else {
+        config
+            .chains
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No chains configured"))?
+    };
+
+    let pool = db::create_pool(&chain.database_url).await?;
 
     let options = QueryOptions {
         timeout_ms: args.timeout,

@@ -11,7 +11,7 @@ use ak47::api;
 use ak47::broadcast::Broadcaster;
 use ak47::config::Config;
 use ak47::db;
-use ak47::materialize::MaterializeService;
+
 use ak47::sync::engine::SyncEngine;
 
 #[derive(ClapArgs)]
@@ -26,7 +26,6 @@ pub async fn run(args: Args) -> Result<()> {
 
     info!(
         chains = config.chains.len(),
-        db = %config.database_url,
         "Loaded config"
     );
 
@@ -38,12 +37,6 @@ pub async fn run(args: Args) -> Result<()> {
             .with_http_listener(metrics_addr)
             .install()?;
     }
-
-    info!("Connecting to database...");
-    let pool = db::create_pool(&config.database_url).await?;
-
-    info!("Running migrations...");
-    db::run_migrations(&pool).await?;
 
     let broadcaster = Arc::new(Broadcaster::new());
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel(1);
@@ -57,48 +50,53 @@ pub async fn run(args: Args) -> Result<()> {
         }
     });
 
-    if config.http.enabled {
-        let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
-        let router = api::router_with_admin_key(
-            pool.clone(),
-            broadcaster.clone(),
-            config.http.admin_api_key.clone(),
-        );
-
-        if config.http.admin_api_key.is_some() {
-            info!(addr = %addr, "Starting HTTP API server (admin endpoints enabled)");
-        } else {
-            info!(addr = %addr, "Starting HTTP API server");
-        }
-
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        let mut shutdown_rx_api = shutdown_tx.subscribe();
-
-        tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = shutdown_rx_api.recv().await;
-                })
-                .await
-                .ok();
-        });
+    // Create pools and run migrations for each chain
+    let mut chain_pools = Vec::new();
+    for chain in &config.chains {
+        info!(chain = %chain.name, db = %chain.database_url, "Connecting to database...");
+        let pool = db::create_pool(&chain.database_url).await?;
+        
+        info!(chain = %chain.name, "Running migrations...");
+        db::run_migrations(&pool).await?;
+        
+        chain_pools.push((chain.clone(), pool));
     }
 
-    // Start materialized view refresh service
-    {
-        let materialize_service = MaterializeService::new(pool.clone(), broadcaster.clone());
-        let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            materialize_service.run(shutdown_rx).await;
-        });
+    // Start HTTP API with first chain's pool (for status queries)
+    // TODO: Could aggregate status across all chains
+    if config.http.enabled {
+        if let Some((_, first_pool)) = chain_pools.first() {
+            let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
+            let router = api::router_with_admin_key(
+                first_pool.clone(),
+                broadcaster.clone(),
+                config.http.admin_api_key.clone(),
+            );
+
+            if config.http.admin_api_key.is_some() {
+                info!(addr = %addr, "Starting HTTP API server (admin endpoints enabled)");
+            } else {
+                info!(addr = %addr, "Starting HTTP API server");
+            }
+
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let mut shutdown_rx_api = shutdown_tx.subscribe();
+
+            tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx_api.recv().await;
+                    })
+                    .await
+                    .ok();
+            });
+        }
     }
 
     // Spawn a sync engine for each chain
     let mut handles = Vec::new();
 
-    for chain in &config.chains {
-        let pool = pool.clone();
-        let chain = chain.clone();
+    for (chain, pool) in chain_pools {
         let broadcaster = broadcaster.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let backfill_shutdown_rx = shutdown_tx.subscribe();
