@@ -1,4 +1,4 @@
-.PHONY: help up down logs seed reset psql build check test bench bench-gen bench-gen-compressed bench-compressed bench-open clean
+.PHONY: help up down logs seed build check test bench bench-gen bench-gen-compressed bench-compressed bench-open clean
 
 .DEFAULT_GOAL := help
 
@@ -59,24 +59,6 @@ seed-heavy:
 		--tip20-weight 3 \
 		--erc20-weight 2 \
 		--swap-weight 2
-
-# Seed and sync: generate txs then index them
-seed-and-sync: seed-heavy
-	@echo "Syncing indexed data..."
-	@./ak47 up --rpc http://localhost:8545 --db postgres://ak47:ak47@localhost:5433/ak47 &
-	@PID=$$!; sleep 30; kill $$PID 2>/dev/null || true
-	@echo "✓ Seeded and synced"
-
-# Reset database
-reset:
-	@echo "Dropping and recreating database..."
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "DROP DATABASE IF EXISTS ak47" > /dev/null
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "CREATE DATABASE ak47" > /dev/null
-	@echo "✓ Database reset"
-
-# Open psql shell
-psql:
-	@$(COMPOSE) exec timescaledb psql -U ak47 -d ak47
 
 # ============================================================================
 # Build & Test
@@ -317,18 +299,15 @@ clean:
 help:
 	@echo "ak47 Development"
 	@echo ""
-	@echo "  make up           Start all services"
-	@echo "  make down         Stop all services"
-	@echo "  make logs         Tail indexer logs"
-	@echo "  make seed         Generate transactions (DURATION=30 TPS=100)"
-	@echo "  make seed-heavy   Generate ~1M+ txs with max variance"
-	@echo "  make seed-and-sync  Seed + index data for tests"
-	@echo "  make reset        Reset database"
-	@echo "  make psql         Open psql shell"
-	@echo "  make build        Build Docker image"
-	@echo "  make check        Run clippy lints"
-	@echo "  make test         Run tests (auto-seeds)"
-	@echo "  make bench-gen    Generate 20M tx seed artifact (run once)"
-	@echo "  make bench        Run benchmarks (restores from artifact)"
+	@echo "  make bench             Run benchmarks (restores from artifact)"
 	@echo "  make bench-compressed  Run benchmarks on compressed data"
-	@echo "  make clean        Stop services and clean"
+	@echo "  make bench-gen         Generate 20M tx seed artifact (run once)"
+	@echo "  make build             Build Docker image"
+	@echo "  make check             Run clippy lints"
+	@echo "  make clean             Stop services and clean"
+	@echo "  make down              Stop all services"
+	@echo "  make logs              Tail indexer logs"
+	@echo "  make seed              Generate transactions (DURATION=30 TPS=100)"
+	@echo "  make seed-heavy        Generate ~1M+ txs with max variance"
+	@echo "  make test              Run tests (auto-seeds)"
+	@echo "  make up                Start all services"
