@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ak47::config::Config;
 use ak47::db;
 use ak47::sync::fetcher::RpcClient;
-use ak47::sync::writer::load_sync_state;
+use ak47::sync::writer::load_all_sync_states;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -53,7 +53,7 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
     println!("╚═══════════════════════════════════════════════════════════╝");
     println!();
 
-    let state = load_sync_state(pool).await?.unwrap_or_default();
+    let states = load_all_sync_states(pool).await?;
 
     for chain in &config.chains {
         let rpc = RpcClient::new(&chain.rpc_url);
@@ -62,7 +62,7 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
         println!("┌─ {} (chain_id: {}) ─────────────────────", chain.name, chain.chain_id);
         println!("│");
 
-        if state.chain_id == chain.chain_id {
+        if let Some(state) = states.iter().find(|s| s.chain_id == chain.chain_id) {
             let head = live_head.unwrap_or(state.head_num);
             let lag = head.saturating_sub(state.synced_num);
 
@@ -131,24 +131,25 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
 }
 
 async fn print_json_status(config: &Config, pool: &db::Pool) -> Result<()> {
-    let state = load_sync_state(pool).await?.unwrap_or_default();
+    let states = load_all_sync_states(pool).await?;
     let mut chains = Vec::new();
 
     for chain in &config.chains {
         let rpc = RpcClient::new(&chain.rpc_url);
         let live_head = rpc.latest_block_number().await.ok();
+        let state = states.iter().find(|s| s.chain_id == chain.chain_id);
 
         let chain_status = serde_json::json!({
             "name": chain.name,
             "chain_id": chain.chain_id,
             "rpc_url": chain.rpc_url,
             "head": live_head,
-            "synced": if state.chain_id == chain.chain_id { Some(state.synced_num) } else { None },
-            "lag": live_head.map(|h| h.saturating_sub(state.synced_num)),
-            "backfill_block": state.backfill_num,
-            "backfill_complete": state.backfill_complete(),
-            "sync_rate": state.sync_rate(),
-            "backfill_eta_secs": state.backfill_eta_secs(),
+            "synced": state.map(|s| s.synced_num),
+            "lag": state.and_then(|s| live_head.map(|h| h.saturating_sub(s.synced_num))),
+            "backfill_block": state.and_then(|s| s.backfill_num),
+            "backfill_complete": state.map(|s| s.backfill_complete()).unwrap_or(false),
+            "sync_rate": state.and_then(|s| s.sync_rate()),
+            "backfill_eta_secs": state.and_then(|s| s.backfill_eta_secs()),
         });
         chains.push(chain_status);
     }

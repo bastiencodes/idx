@@ -299,13 +299,13 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
     Ok(())
 }
 
-pub async fn load_sync_state(pool: &Pool) -> Result<Option<SyncState>> {
+pub async fn load_sync_state(pool: &Pool, chain_id: u64) -> Result<Option<SyncState>> {
     let conn = pool.get().await?;
 
     let row = conn
         .query_opt(
-            "SELECT chain_id, head_num, synced_num, backfill_num, started_at FROM sync_state WHERE id = 1",
-            &[],
+            "SELECT chain_id, head_num, synced_num, backfill_num, started_at FROM sync_state WHERE chain_id = $1",
+            &[&(chain_id as i64)],
         )
         .await?;
 
@@ -318,15 +318,37 @@ pub async fn load_sync_state(pool: &Pool) -> Result<Option<SyncState>> {
     }))
 }
 
+/// Load all sync states (for status display)
+pub async fn load_all_sync_states(pool: &Pool) -> Result<Vec<SyncState>> {
+    let conn = pool.get().await?;
+
+    let rows = conn
+        .query(
+            "SELECT chain_id, head_num, synced_num, backfill_num, started_at FROM sync_state ORDER BY chain_id",
+            &[],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| SyncState {
+            chain_id: r.get::<_, i64>(0) as u64,
+            head_num: r.get::<_, i64>(1) as u64,
+            synced_num: r.get::<_, i64>(2) as u64,
+            backfill_num: r.get::<_, Option<i64>>(3).map(|n| n as u64),
+            started_at: r.get(4),
+        })
+        .collect())
+}
+
 pub async fn save_sync_state(pool: &Pool, state: &SyncState) -> Result<()> {
     let conn = pool.get().await?;
 
     conn.execute(
         r#"
-        INSERT INTO sync_state (id, chain_id, head_num, synced_num, backfill_num, started_at, updated_at)
-        VALUES (1, $1, $2, $3, $4, COALESCE($5, NOW()), NOW())
-        ON CONFLICT (id) DO UPDATE SET
-            chain_id = EXCLUDED.chain_id,
+        INSERT INTO sync_state (chain_id, head_num, synced_num, backfill_num, started_at, updated_at)
+        VALUES ($1, $2, $3, $4, COALESCE($5, NOW()), NOW())
+        ON CONFLICT (chain_id) DO UPDATE SET
             head_num = EXCLUDED.head_num,
             synced_num = EXCLUDED.synced_num,
             backfill_num = EXCLUDED.backfill_num,

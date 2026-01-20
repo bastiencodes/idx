@@ -71,19 +71,18 @@ async fn handle_health() -> &'static str {
 
 #[derive(Serialize)]
 struct StatusResponse {
-    #[serde(flatten)]
-    status: Option<SyncStatus>,
     ok: bool,
+    chains: Vec<SyncStatus>,
 }
 
 async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
-    let status = crate::service::get_status(&state.pool)
+    let chains = crate::service::get_all_status(&state.pool)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(StatusResponse {
-        ok: status.is_some(),
-        status,
+        ok: true,
+        chains,
     }))
 }
 
@@ -193,9 +192,11 @@ async fn handle_query_live(
             }
         }
 
-        // Get current head block to set baseline
-        if let Ok(Some(s)) = crate::service::get_status(&pool).await {
-            last_block_num = s.synced_num as u64;
+        // Get current head block to set baseline (use first chain's synced_num)
+        if let Ok(statuses) = crate::service::get_all_status(&pool).await {
+            if let Some(s) = statuses.first() {
+                last_block_num = s.synced_num as u64;
+            }
         }
 
         // Stream updates on each new block

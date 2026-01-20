@@ -12,7 +12,6 @@ bind = "0.0.0.0"
 enabled = true
 port = 9090
 
-# Chains to index
 [[chains]]
 name = "moderato"
 chain_id = 42431
@@ -20,7 +19,6 @@ rpc_url = "https://eng:aphex-twin-jeff-mills@rpc.moderato.tempo.xyz"
 backfill = true
 batch_size = 100
 
-# Add more chains:
 [[chains]]
 name = "mainnet"
 chain_id = 4217

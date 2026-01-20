@@ -45,7 +45,7 @@ impl SyncEngine {
     }
 
     pub async fn run(&mut self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
-        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         let mut progress = SyncProgress::new(self.chain_id, state.synced_num);
 
         loop {
@@ -68,7 +68,7 @@ impl SyncEngine {
     /// Pipelined sync: fetch next batch while writing current batch
     /// This overlaps network I/O with database I/O for better throughput
     async fn tick_pipelined(&mut self, progress: &mut SyncProgress) -> Result<()> {
-        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         let remote_head = self.rpc.latest_block_number().await?;
 
         // If first sync for this chain, start at head (backfill handles history)
@@ -385,7 +385,7 @@ impl SyncEngine {
         write_receipts(&self.pool, &receipt_rows).await?;
 
         // Update sync state
-        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         let new_state = SyncState {
             chain_id: self.chain_id,
             head_num: num,
@@ -413,7 +413,7 @@ impl SyncEngine {
             ));
         }
 
-        let mut state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        let mut state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         
         // Determine starting point for backfill
         let start_block = match state.backfill_num {
@@ -482,7 +482,7 @@ impl SyncEngine {
 
     /// Get current sync status
     pub async fn status(&self) -> Result<SyncState> {
-        let state = load_sync_state(&self.pool).await?.unwrap_or_default();
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         Ok(state)
     }
 
