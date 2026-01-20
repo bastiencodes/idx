@@ -5,6 +5,7 @@ services:
       POSTGRES_USER: ak47
       POSTGRES_PASSWORD: ak47
       POSTGRES_DB: ak47
+      POSTGRES_HOST_AUTH_METHOD: md5
     ports:
       - "5433:5432"
     volumes:
@@ -30,7 +31,7 @@ services:
       - node
       - --dev
       - --dev.block-time
-      - "1sec"
+      - "200ms"
       - --dev.mnemonic
       - "test test test test test test test test test test test junk"
       - --http.addr

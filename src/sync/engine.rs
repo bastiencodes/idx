@@ -87,6 +87,8 @@ impl SyncEngine {
         };
 
         if synced >= remote_head {
+            // Still report progress to keep logs alive when synced
+            progress.report_forward(synced as u64, remote_head as u64, 0);
             tokio::time::sleep(Duration::from_millis(100)).await;
             return Ok(());
         }

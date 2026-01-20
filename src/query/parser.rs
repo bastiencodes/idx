@@ -1,5 +1,10 @@
 use anyhow::{anyhow, Result};
 use sha3::{Digest, Keccak256};
+use sqlparser::ast::visit_expressions;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
+use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventSignature {
@@ -67,34 +72,20 @@ impl EventSignature {
         format!("{}({})", name, param_types.join(","))
     }
 
-    /// Generate PostgreSQL-compatible CTE SQL
+    /// Generate PostgreSQL-compatible CTE SQL (includes all decoded columns)
     pub fn to_cte_sql(&self) -> String {
-        self.to_cte_sql_postgres()
+        self.to_cte_sql_postgres_filtered(None)
     }
 
     /// Generate PostgreSQL-compatible CTE SQL (uses bytea and abi_* functions)
     pub fn to_cte_sql_postgres(&self) -> String {
-        let mut selects = Vec::new();
-        let mut topic_idx = 2; // topic0 is selector (topics[1] in PG), first indexed param is topics[2]
-        let mut data_offset = 0;
+        self.to_cte_sql_postgres_filtered(None)
+    }
 
-        for (i, param) in self.params.iter().enumerate() {
-            let col_name = param
-                .name
-                .as_deref().map_or_else(|| format!("arg{i}"), |n| n.to_string());
-
-            let decode_expr = if param.indexed {
-                let expr = param.ty.topic_decode_sql_postgres(topic_idx);
-                topic_idx += 1;
-                expr
-            } else {
-                let expr = param.ty.data_decode_sql_postgres(data_offset);
-                data_offset += 32;
-                expr
-            };
-
-            selects.push(format!("{decode_expr} AS \"{col_name}\""));
-        }
+    /// Generate PostgreSQL-compatible CTE SQL, only including columns used in the query.
+    /// If `used_columns` is None, includes all decoded columns.
+    pub fn to_cte_sql_postgres_filtered(&self, used_columns: Option<&HashSet<String>>) -> String {
+        let selects = self.build_select_expressions(used_columns, false);
 
         let select_clause = if selects.is_empty() {
             String::new()
@@ -114,29 +105,15 @@ impl EventSignature {
         )
     }
 
-    /// Generate DuckDB-compatible CTE SQL (uses VARCHAR hex strings and macros)
+    /// Generate DuckDB-compatible CTE SQL (includes all decoded columns)
     pub fn to_cte_sql_duckdb(&self) -> String {
-        let mut selects = Vec::new();
-        let mut topic_idx = 2; // topics[1] is selector, first indexed param is topics[2]
-        let mut data_offset = 0;
+        self.to_cte_sql_duckdb_filtered(None)
+    }
 
-        for (i, param) in self.params.iter().enumerate() {
-            let col_name = param
-                .name
-                .as_deref().map_or_else(|| format!("arg{i}"), |n| n.to_string());
-
-            let decode_expr = if param.indexed {
-                let expr = param.ty.topic_decode_sql_duckdb(topic_idx);
-                topic_idx += 1;
-                expr
-            } else {
-                let expr = param.ty.data_decode_sql_duckdb(data_offset);
-                data_offset += 32;
-                expr
-            };
-
-            selects.push(format!("{decode_expr} AS \"{col_name}\""));
-        }
+    /// Generate DuckDB-compatible CTE SQL, only including columns used in the query.
+    /// If `used_columns` is None, includes all decoded columns.
+    pub fn to_cte_sql_duckdb_filtered(&self, used_columns: Option<&HashSet<String>>) -> String {
+        let selects = self.build_select_expressions(used_columns, true);
 
         let select_clause = if selects.is_empty() {
             String::new()
@@ -154,6 +131,110 @@ impl EventSignature {
             select_clause = select_clause,
             topic0 = self.topic0_hex(),
         )
+    }
+
+    /// Build SELECT expressions for decoded columns, optionally filtering by used columns.
+    fn build_select_expressions(
+        &self,
+        used_columns: Option<&HashSet<String>>,
+        is_duckdb: bool,
+    ) -> Vec<String> {
+        let mut selects = Vec::new();
+        let mut topic_idx = 2;
+        let mut data_offset = 0;
+
+        for (i, param) in self.params.iter().enumerate() {
+            let col_name = param
+                .name
+                .as_deref()
+                .map_or_else(|| format!("arg{i}"), |n| n.to_string());
+
+            // Calculate offsets even for skipped columns to maintain correct positions
+            let (decode_expr, new_topic_idx, new_data_offset) = if param.indexed {
+                let expr = if is_duckdb {
+                    param.ty.topic_decode_sql_duckdb(topic_idx)
+                } else {
+                    param.ty.topic_decode_sql_postgres(topic_idx)
+                };
+                (expr, topic_idx + 1, data_offset)
+            } else {
+                let expr = if is_duckdb {
+                    param.ty.data_decode_sql_duckdb(data_offset)
+                } else {
+                    param.ty.data_decode_sql_postgres(data_offset)
+                };
+                (expr, topic_idx, data_offset + 32)
+            };
+
+            topic_idx = new_topic_idx;
+            data_offset = new_data_offset;
+
+            // Only include column if it's used (or if no filter is specified)
+            let include = match used_columns {
+                None => true,
+                Some(cols) => cols.contains(&col_name) || cols.contains(&col_name.to_lowercase()),
+            };
+
+            if include {
+                selects.push(format!("{decode_expr} AS \"{col_name}\""));
+            }
+        }
+
+        selects
+    }
+
+    /// Returns the list of decoded column names from this signature.
+    pub fn decoded_column_names(&self) -> Vec<String> {
+        self.params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| {
+                param
+                    .name
+                    .as_deref()
+                    .map_or_else(|| format!("arg{i}"), |n| n.to_string())
+            })
+            .collect()
+    }
+}
+
+/// Extract all column/identifier references from a SQL query.
+/// Returns a set of lowercase column names referenced in the query.
+pub fn extract_column_references(sql: &str) -> HashSet<String> {
+    let mut columns = HashSet::new();
+
+    let dialect = GenericDialect {};
+    let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
+        return columns;
+    };
+
+    for stmt in &statements {
+        let _ = visit_expressions(stmt, |expr| {
+            extract_idents_from_expr(expr, &mut columns);
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    columns
+}
+
+/// Recursively extract identifiers from an expression.
+fn extract_idents_from_expr(expr: &sqlparser::ast::Expr, columns: &mut HashSet<String>) {
+    match expr {
+        sqlparser::ast::Expr::Identifier(ident) => {
+            columns.insert(ident.value.to_lowercase());
+        }
+        sqlparser::ast::Expr::CompoundIdentifier(idents) => {
+            // For table.column, we want the column part (last identifier)
+            if let Some(last) = idents.last() {
+                columns.insert(last.value.to_lowercase());
+            }
+            // Also add without qualification in case it's used both ways
+            for ident in idents {
+                columns.insert(ident.value.to_lowercase());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -365,12 +446,12 @@ impl AbiType {
         }
     }
 
-    // DuckDB decode functions (VARCHAR hex string-based)
+    // DuckDB decode functions (use native Rust UDFs for performance)
 
     pub fn topic_decode_sql_duckdb(&self, topic_idx: usize) -> String {
         match self {
-            AbiType::Address => format!("topic_address(topics[{topic_idx}])"),
-            AbiType::Uint(_) | AbiType::Int(_) => format!("topic_uint(topics[{topic_idx}])"),
+            AbiType::Address => format!("topic_address_native(topics[{topic_idx}])"),
+            AbiType::Uint(_) | AbiType::Int(_) => format!("topic_uint_native(topics[{topic_idx}])"),
             AbiType::Bool => format!("topics[{topic_idx}] != '0x0000000000000000000000000000000000000000000000000000000000000000'"),
             AbiType::Bytes(Some(_) | None) => format!("topics[{topic_idx}]"),
             _ => format!("topics[{topic_idx}]"),
@@ -379,9 +460,9 @@ impl AbiType {
 
     pub fn data_decode_sql_duckdb(&self, offset: usize) -> String {
         match self {
-            AbiType::Address => format!("abi_address(data, {offset})"),
-            AbiType::Uint(_) => format!("abi_uint(data, {offset})"),
-            AbiType::Int(_) => format!("abi_uint(data, {offset})"), // TODO: proper signed handling
+            AbiType::Address => format!("abi_address_native(data, {offset})"),
+            AbiType::Uint(_) => format!("abi_uint_native(data, {offset})"),
+            AbiType::Int(_) => format!("abi_uint_native(data, {offset})"), // TODO: proper signed handling
             AbiType::Bool => format!("abi_bool(data, {offset})"),
             AbiType::Bytes(Some(_) | None) => format!("abi_bytes32(data, {offset})"),
             AbiType::String => format!("abi_bytes32(data, {offset})"), // TODO: dynamic string support
@@ -443,7 +524,7 @@ mod tests {
         )
         .unwrap();
         let cte = sig.to_cte_sql();
-        assert!(cte.contains("\"Transfer\""));
+        assert!(cte.contains("transfer AS"));
         assert!(cte.contains("abi_address(topics[2])"));
         assert!(cte.contains("abi_address(topics[3])"));
         assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))"));
@@ -479,11 +560,110 @@ mod tests {
         )
         .unwrap();
         let cte = sig.to_cte_sql_duckdb();
-        assert!(cte.contains("\"Transfer\""));
-        assert!(cte.contains("topic_address(topics[2])"));
-        assert!(cte.contains("topic_address(topics[3])"));
-        assert!(cte.contains("abi_uint(data, 0)"));
+        assert!(cte.contains("transfer AS"));
+        assert!(cte.contains("topic_address_native(topics[2])"));
+        assert!(cte.contains("topic_address_native(topics[3])"));
+        assert!(cte.contains("abi_uint_native(data, 0)"));
         // DuckDB uses '0x...' format instead of '\x...'
         assert!(cte.contains("selector = '0xddf252ad"));
+    }
+
+    #[test]
+    fn test_extract_column_references() {
+        let cols = extract_column_references("SELECT \"to\", COUNT(*) FROM transfer GROUP BY \"to\"");
+        assert!(cols.contains("to"));
+        // COUNT is a function, not a column reference
+
+        let cols = extract_column_references("SELECT value, SUM(amount) FROM t WHERE x > 5");
+        assert!(cols.contains("value"));
+        assert!(cols.contains("amount"));
+        assert!(cols.contains("x"));
+    }
+
+    #[test]
+    fn test_extract_column_references_compound() {
+        let cols = extract_column_references("SELECT t.from, t.to FROM transfer t");
+        assert!(cols.contains("from"));
+        assert!(cols.contains("to"));
+    }
+
+    #[test]
+    fn test_cte_filtered_duckdb_only_to() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        
+        let used_cols: HashSet<String> = ["to"].iter().map(|s| s.to_string()).collect();
+        let cte = sig.to_cte_sql_duckdb_filtered(Some(&used_cols));
+        
+        // Should include "to" but not "from" or "value"
+        assert!(cte.contains("topic_address_native(topics[3]) AS \"to\""));
+        assert!(!cte.contains("\"from\""));
+        assert!(!cte.contains("\"value\""));
+    }
+
+    #[test]
+    fn test_cte_filtered_duckdb_from_and_value() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        
+        let used_cols: HashSet<String> = ["from", "value"].iter().map(|s| s.to_string()).collect();
+        let cte = sig.to_cte_sql_duckdb_filtered(Some(&used_cols));
+        
+        // Should include "from" and "value" but not "to"
+        assert!(cte.contains("topic_address_native(topics[2]) AS \"from\""));
+        assert!(cte.contains("abi_uint_native(data, 0) AS \"value\""));
+        assert!(!cte.contains("\"to\""));
+    }
+
+    #[test]
+    fn test_cte_filtered_postgres_only_value() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        
+        let used_cols: HashSet<String> = ["value"].iter().map(|s| s.to_string()).collect();
+        let cte = sig.to_cte_sql_postgres_filtered(Some(&used_cols));
+        
+        // Should include "value" but not "from" or "to"
+        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32)) AS \"value\""));
+        assert!(!cte.contains("\"from\""));
+        assert!(!cte.contains("\"to\""));
+    }
+
+    #[test]
+    fn test_cte_filtered_none_includes_all() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        
+        let cte = sig.to_cte_sql_duckdb_filtered(None);
+        
+        // Should include all columns
+        assert!(cte.contains("\"from\""));
+        assert!(cte.contains("\"to\""));
+        assert!(cte.contains("\"value\""));
+    }
+
+    #[test]
+    fn test_cte_filtered_preserves_offsets() {
+        // When skipping "from", "to" should still use topics[3] and "value" should still use data offset 0
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        
+        let used_cols: HashSet<String> = ["to", "value"].iter().map(|s| s.to_string()).collect();
+        let cte = sig.to_cte_sql_duckdb_filtered(Some(&used_cols));
+        
+        // "to" is the second indexed param, so it should still be topics[3]
+        assert!(cte.contains("topic_address_native(topics[3]) AS \"to\""));
+        // "value" is the first data param, so it should still be offset 0
+        assert!(cte.contains("abi_uint_native(data, 0) AS \"value\""));
     }
 }

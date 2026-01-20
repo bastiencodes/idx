@@ -17,11 +17,12 @@ COPY benches ./benches
 
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ak47 /usr/local/bin/

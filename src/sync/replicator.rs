@@ -294,25 +294,13 @@ pub async fn backfill_from_postgres(
 
 /// Gets the current DuckDB sync status.
 pub async fn get_sync_status(duckdb: &Arc<DuckDbPool>) -> Result<DuckDbSyncStatus> {
-    let conn = duckdb.conn().await;
-    let mut stmt = conn.prepare(
-        "SELECT latest_block, updated_at FROM duckdb_sync_state WHERE id = 1",
-    )?;
+    // Query actual max block from blocks table (authoritative source)
+    let latest_block = duckdb.latest_block().await?.unwrap_or(0);
 
-    let result = stmt.query_row([], |row| {
-        Ok(DuckDbSyncStatus {
-            latest_block: row.get(0)?,
-            updated_at: row.get::<_, String>(1)?,
-        })
-    });
-
-    match result {
-        Ok(status) => Ok(status),
-        Err(_) => Ok(DuckDbSyncStatus {
-            latest_block: 0,
-            updated_at: String::new(),
-        }),
-    }
+    Ok(DuckDbSyncStatus {
+        latest_block,
+        updated_at: String::new(),
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

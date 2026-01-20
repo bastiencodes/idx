@@ -29,7 +29,9 @@ services:
     restart: unless-stopped
 
   ak47:
-    image: ghcr.io/tempoxyz/ak47:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     command:
       - up
       - --config

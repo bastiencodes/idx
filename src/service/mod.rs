@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::db::{DuckDbPool, Pool};
 use crate::metrics;
-use crate::query::{route_query, EventSignature, QueryEngine};
+use crate::query::{extract_column_references, route_query, EventSignature, QueryEngine};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncStatus {
@@ -149,11 +149,13 @@ pub async fn execute_query_with_engine(
     };
 
     // Generate engine-specific CTE SQL if a signature is provided
+    // Smart CTE: only decode columns that are actually used in the query
     let sql = if let Some(sig_str) = signature {
         let sig = EventSignature::parse(sig_str)?;
+        let used_columns = extract_column_references(sql);
         let cte = match engine {
-            QueryEngine::DuckDb => sig.to_cte_sql_duckdb(),
-            QueryEngine::Postgres => sig.to_cte_sql_postgres(),
+            QueryEngine::DuckDb => sig.to_cte_sql_duckdb_filtered(Some(&used_columns)),
+            QueryEngine::Postgres => sig.to_cte_sql_postgres_filtered(Some(&used_columns)),
         };
         format!("WITH {cte} {sql}")
     } else {
@@ -269,7 +271,7 @@ async fn execute_query_duckdb(
                 engine: Some("duckdb".to_string()),
             })
         }
-        Ok(Err(e)) => Err(anyhow!("DuckDB query error: {e}")),
+        Ok(Err(e)) => Err(anyhow!("DuckDB query error: {e:#}")),
         Err(_) => Err(anyhow!("Query timeout")),
     }
 }

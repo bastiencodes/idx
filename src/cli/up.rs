@@ -12,7 +12,7 @@ use ak47::broadcast::Broadcaster;
 use ak47::config::Config;
 use ak47::db::{self, DuckDbPool};
 use ak47::sync::engine::SyncEngine;
-use ak47::sync::{Replicator, ReplicatorHandle};
+use ak47::sync::{backfill_from_postgres, Replicator, ReplicatorHandle};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -69,6 +69,21 @@ pub async fn run(args: Args) -> Result<()> {
         let replicator_handle: Option<ReplicatorHandle> = if let Some(ref duckdb_path) = chain.duckdb_path {
             info!(chain = %chain.name, path = %duckdb_path, "Initializing DuckDB");
             let duckdb_pool = Arc::new(DuckDbPool::new(duckdb_path)?);
+
+            // Backfill DuckDB from PostgreSQL (catches up any missed blocks)
+            let pg_pool = pool.clone();
+            let duck_pool = duckdb_pool.clone();
+            tokio::spawn(async move {
+                match backfill_from_postgres(&pg_pool, &duck_pool, 1000).await {
+                    Ok(synced) if synced > 0 => {
+                        info!(synced, "DuckDB backfill complete");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(error = %e, "DuckDB backfill failed");
+                    }
+                }
+            });
 
             // Create replicator for syncing Postgres -> DuckDB
             let (replicator, handle) = Replicator::new(duckdb_pool.clone(), 1000);

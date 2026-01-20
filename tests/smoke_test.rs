@@ -3,6 +3,7 @@ mod common;
 use common::tempo::TempoNode;
 use common::testdb::TestDb;
 
+use ak47::query::EventSignature;
 use ak47::sync::engine::SyncEngine;
 use ak47::sync::writer::{detect_gaps, get_block_hash};
 
@@ -558,4 +559,332 @@ async fn test_seeded_receipt_stats() {
         .get(0);
 
     println!("Success: {success}, Failed: {failed}");
+}
+
+// ============================================================================
+// Query service integration tests - routes through service layer
+// ============================================================================
+
+use std::sync::Arc;
+use ak47::db::DuckDbPool;
+use ak47::service::{execute_query_with_engine, QueryOptions};
+
+fn default_options() -> QueryOptions {
+    QueryOptions { timeout_ms: 5000, limit: 1000 }
+}
+
+#[tokio::test]
+async fn test_query_blocks_postgres() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "SELECT num, hash FROM blocks ORDER BY num DESC LIMIT 5",
+        None,
+        &opts,
+        Some("postgres"),
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("postgres"));
+    assert!(result.row_count > 0, "Expected blocks in seeded data");
+    assert!(result.columns.contains(&"num".to_string()));
+    assert!(result.columns.contains(&"hash".to_string()));
+}
+
+#[tokio::test]
+async fn test_query_blocks_duckdb() {
+    let db = TestDb::new().await;
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "SELECT num, hash FROM blocks ORDER BY num DESC LIMIT 5",
+        None,
+        &opts,
+        Some("duckdb"),
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("duckdb"));
+    assert!(result.columns.contains(&"num".to_string()));
+}
+
+#[tokio::test]
+async fn test_query_txs_point_lookup() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "SELECT block_num, hash, \"from\" FROM txs WHERE block_num = 1 LIMIT 10",
+        None,
+        &opts,
+        None, // Auto-route: point lookup -> postgres
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("postgres"));
+}
+
+#[tokio::test]
+async fn test_query_olap_aggregation_routes_to_duckdb() {
+    let db = TestDb::new().await;
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "SELECT miner, COUNT(*) as cnt FROM blocks GROUP BY miner ORDER BY cnt DESC LIMIT 10",
+        None,
+        &opts,
+        None, // Auto-route: GROUP BY -> duckdb
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("duckdb"));
+}
+
+#[tokio::test]
+async fn test_query_olap_sum_routes_to_duckdb() {
+    let db = TestDb::new().await;
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "SELECT SUM(gas_used) FROM blocks",
+        None,
+        &opts,
+        None, // Auto-route: SUM -> duckdb
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("duckdb"));
+}
+
+#[tokio::test]
+async fn test_query_logs_with_event_signature() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "SELECT * FROM transfer LIMIT 10",
+        Some("Transfer(address indexed from, address indexed to, uint256 value)"),
+        &opts,
+        Some("postgres"),
+    )
+    .await
+    .expect("Query with signature CTE failed");
+
+    assert_eq!(result.engine.as_deref(), Some("postgres"));
+    // CTE should decode indexed params
+    assert!(result.columns.contains(&"from".to_string()));
+    assert!(result.columns.contains(&"to".to_string()));
+    assert!(result.columns.contains(&"value".to_string()));
+}
+
+#[tokio::test]
+async fn test_query_logs_with_event_signature_duckdb() {
+    let db = TestDb::new().await;
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "SELECT * FROM transfer LIMIT 10",
+        Some("Transfer(address indexed from, address indexed to, uint256 value)"),
+        &opts,
+        Some("duckdb"),
+    )
+    .await
+    .expect("Query with signature CTE on DuckDB failed");
+
+    assert_eq!(result.engine.as_deref(), Some("duckdb"));
+    assert!(result.columns.contains(&"from".to_string()));
+    assert!(result.columns.contains(&"to".to_string()));
+    assert!(result.columns.contains(&"value".to_string()));
+}
+
+#[tokio::test]
+async fn test_query_receipts() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "SELECT block_num, tx_idx, status, gas_used FROM receipts LIMIT 10",
+        None,
+        &opts,
+        Some("postgres"),
+    )
+    .await
+    .expect("Query failed");
+
+    assert!(result.columns.contains(&"status".to_string()));
+    assert!(result.columns.contains(&"gas_used".to_string()));
+}
+
+#[tokio::test]
+async fn test_query_rejects_non_select() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "DELETE FROM blocks",
+        None,
+        &opts,
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("SELECT"));
+}
+
+#[tokio::test]
+async fn test_query_rejects_forbidden_keywords() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    let result = execute_query_with_engine(
+        &db.pool,
+        None,
+        "SELECT * FROM blocks; DROP TABLE blocks;",
+        None,
+        &opts,
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("DROP"));
+}
+
+#[tokio::test]
+async fn test_query_explicit_engine_hint() {
+    let db = TestDb::new().await;
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let opts = default_options();
+
+    // Force postgres even for OLAP query
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "/* engine=postgres */ SELECT COUNT(*) FROM blocks GROUP BY miner",
+        None,
+        &opts,
+        None,
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("postgres"));
+
+    // Force duckdb even for simple query
+    let result = execute_query_with_engine(
+        &db.pool,
+        Some(&duckdb),
+        "/* engine=duckdb */ SELECT * FROM blocks LIMIT 1",
+        None,
+        &opts,
+        None,
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("duckdb"));
+}
+
+#[tokio::test]
+async fn test_query_fallback_to_postgres_without_duckdb() {
+    let db = TestDb::new().await;
+    let opts = default_options();
+
+    // OLAP query but no DuckDB pool -> falls back to postgres
+    let result = execute_query_with_engine(
+        &db.pool,
+        None, // No DuckDB
+        "SELECT COUNT(*) FROM blocks GROUP BY miner",
+        None,
+        &opts,
+        None,
+    )
+    .await
+    .expect("Query failed");
+
+    assert_eq!(result.engine.as_deref(), Some("postgres"));
+}
+
+// ============================================================================
+// Event signature parsing tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_event_signature_selector() {
+    let sig = EventSignature::parse("Transfer(address,address,uint256)").unwrap();
+    assert_eq!(sig.selector_hex(), "ddf252ad");
+
+    let sig = EventSignature::parse("Approval(address,address,uint256)").unwrap();
+    assert_eq!(sig.selector_hex(), "8c5be1e5");
+}
+
+// ============================================================================
+// DuckDB CTE tests (in-memory, no devnet required)
+// ============================================================================
+
+#[tokio::test]
+async fn test_duckdb_event_cte() {
+    let duckdb = Arc::new(DuckDbPool::new(":memory:").expect("Failed to create DuckDB"));
+    let conn = duckdb.conn().await;
+
+    // Insert test log matching Transfer signature
+    conn.execute(
+        r#"INSERT INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data)
+           VALUES (100, '2024-01-01 00:00:00', 0, 0, '0xtxhash', '0xcontract',
+                   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+                   ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+                    '0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    '0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+                   '0x0000000000000000000000000000000000000000000000000000000000000064')"#,
+        [],
+    ).expect("Failed to insert test log");
+
+    // Build CTE query
+    let sig = EventSignature::parse("Transfer(address indexed from, address indexed to, uint256 value)").unwrap();
+    let cte = sig.to_cte_sql_duckdb();
+    let sql = format!("WITH {cte} SELECT * FROM transfer LIMIT 1");
+
+    let mut stmt = conn.prepare(&sql).expect("Failed to prepare CTE query");
+    let mut rows = stmt.query([]).expect("Failed to execute CTE query");
+    
+    let row = rows.next().expect("Failed to get row").expect("No rows returned");
+    
+    // Verify decoded values
+    let from: String = row.get(6).expect("Failed to get from");
+    let to: String = row.get(7).expect("Failed to get to");
+    let value: i128 = row.get(8).expect("Failed to get value");
+
+    assert_eq!(from, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(to, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    // Value is UHUGEINT (128-bit unsigned) - 0x64 = 100
+    assert_eq!(value, 100);
 }
