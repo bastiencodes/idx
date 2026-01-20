@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">ak47</h1>
-  <p align="center"><strong>High-throughput Tempo blockchain indexer in Rust</strong></p>
+  <p align="center"><strong>High-throughput Tempo indexer in Rust</strong></p>
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 ---
 
-**ak47** indexes [Tempo](https://tempo.xyz) blockchain data into Postgres (TimescaleDB) for fast point lookups (OLTP) and analytics (OLAP). 
+**ak47** indexes [Tempo](https://tempo.xyz) chain data into Postgres (TimescaleDB) for fast point lookups (OLTP) and analytics (OLAP). 
 
 ## Features
 
