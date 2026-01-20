@@ -127,7 +127,6 @@ pub async fn run(args: Args) -> Result<()> {
                     let backfill_engine = SyncEngine::new(pool.clone(), &chain.rpc_url).await?;
 
                     let batch_size = chain.batch_size;
-                    let compress_pool = pool.clone();
                     tokio::spawn(async move {
                         // Get chain head from RPC (don't rely on state which may not be set yet)
                         let head = match backfill_engine.get_head().await {
@@ -154,10 +153,7 @@ pub async fn run(args: Args) -> Result<()> {
                             .await
                         {
                             Ok(synced) if synced > 0 => {
-                                info!(blocks = synced, "Backfill complete, starting compression");
-                                if let Err(e) = ak47::db::compress_historical_chunks(&compress_pool).await {
-                                    tracing::error!(error = %e, "Compression failed");
-                                }
+                                info!(blocks = synced, "Backfill complete");
                             }
                             Ok(_) => {}
                             Err(e) => {

@@ -1,5 +1,3 @@
--- Transactions table (Tempo 0x76 native)
--- Partitioned by block range (2M blocks per partition)
 CREATE TABLE IF NOT EXISTS txs (
     block_num               INT8 NOT NULL,
     block_timestamp         TIMESTAMPTZ NOT NULL,
@@ -24,13 +22,28 @@ CREATE TABLE IF NOT EXISTS txs (
     valid_after             INT8,
     signature_type          INT2,
     PRIMARY KEY (block_num, idx)
-) PARTITION BY RANGE (block_num);
+);
 
--- Default partition for initial development (covers 0-2M)
-CREATE TABLE IF NOT EXISTS txs_b0m PARTITION OF txs
-    FOR VALUES FROM (0) TO (2000000);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') 
+       AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_partitioned_table pt ON c.oid = pt.partrelid WHERE c.relname = 'txs') THEN
+        PERFORM create_hypertable('txs', by_range('block_num', 500000));
+    END IF;
+END $$;
 
--- Transaction lookups
 CREATE INDEX IF NOT EXISTS idx_txs_hash ON txs (hash);
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') THEN
+        ALTER TABLE txs SET (
+            timescaledb.compress,
+            timescaledb.compress_segmentby = 'type',
+            timescaledb.compress_orderby = 'block_num DESC, idx'
+        );
+        PERFORM add_compression_policy('txs', 500000, if_not_exists => true);
+    END IF;
+END $$;

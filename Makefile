@@ -93,8 +93,15 @@ check:
 # Run tests (sequential execution due to shared DB)
 test:
 	@$(COMPOSE) up -d timescaledb tempo
-	@sleep 2
-	@cargo test -- --test-threads=1 --nocapture
+	@echo "Waiting for TimescaleDB..."
+	@until $(COMPOSE) exec -T timescaledb pg_isready -U ak47 -d postgres > /dev/null 2>&1; do sleep 1; done
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "CREATE DATABASE ak47" > /dev/null 2>&1 || true
+	@echo "Waiting for Tempo..."
+	@until curl -s http://localhost:8545 -X POST -H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -q result; do sleep 1; done
+	@echo "Running tests..."
+	@DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47 RPC_URL=http://localhost:8545 \
+		cargo test -- --test-threads=1 --nocapture
 
 # Benchmark parameters
 BENCH_TXS ?= 5000000

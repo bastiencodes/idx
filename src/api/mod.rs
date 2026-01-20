@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::{
         sse::{Event as SseEvent, KeepAlive, KeepAliveStream},
@@ -57,8 +57,7 @@ pub fn router_with_admin_key(
     let mut router = Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
-        .route("/query", get(handle_query))
-        .route("/logs/{signature}", get(handle_logs));
+        .route("/query", get(handle_query));
 
     // Add protected /materialize routes if admin key is configured
     if let Some(key) = admin_api_key {
@@ -287,107 +286,6 @@ async fn handle_query_live(
 
     let stream: SseStream = Box::pin(stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-#[derive(Deserialize)]
-pub struct LogsQuery {
-    #[serde(default = "default_limit")]
-    limit: i64,
-    #[serde(default)]
-    after: Option<String>,
-    #[serde(default, alias = "chain_id", rename = "chainId")]
-    chain_id: Option<u64>,
-}
-
-async fn handle_logs(
-    State(state): State<AppState>,
-    Path(signature): Path<String>,
-    Query(params): Query<LogsQuery>,
-) -> Result<Json<QueryResponse>, ApiError> {
-    let pool = state
-        .get_pool(params.chain_id)
-        .ok_or_else(|| ApiError::BadRequest("Unknown chain_id".into()))?;
-
-    let time_filter = if let Some(ref after) = params.after {
-        parse_time_filter(after)?
-    } else {
-        "1 = 1".to_string()
-    };
-
-    let event_name = extract_event_name(&signature)?;
-    
-    let sql = format!(
-        "SELECT * FROM \"{}\" WHERE {} ORDER BY block_timestamp DESC LIMIT {}",
-        event_name,
-        time_filter,
-        params.limit.clamp(1, 10000)
-    );
-
-    let options = QueryOptions {
-        timeout_ms: 5000,
-        limit: params.limit.clamp(1, 10000),
-    };
-
-    let result = crate::service::execute_query(pool, &sql, Some(&signature), &options)
-        .await
-        .map_err(|e| ApiError::QueryError(e.to_string()))?;
-
-    Ok(Json(QueryResponse { result, ok: true }))
-}
-
-fn extract_event_name(signature: &str) -> Result<String, ApiError> {
-    let name = signature
-        .split('(')
-        .next()
-        .unwrap_or("")
-        .trim();
-    
-    if name.is_empty() {
-        return Err(ApiError::BadRequest("Empty event name".into()));
-    }
-    
-    if name.len() > 64 {
-        return Err(ApiError::BadRequest("Event name too long".into()));
-    }
-    
-    let is_valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    
-    if !is_valid {
-        return Err(ApiError::BadRequest("Invalid event name: must be alphanumeric".into()));
-    }
-    
-    Ok(name.to_string())
-}
-
-fn parse_time_filter(after: &str) -> Result<String, ApiError> {
-    if after.ends_with('h') {
-        let hours: i64 = after
-            .trim_end_matches('h')
-            .parse()
-            .map_err(|_| ApiError::BadRequest("Invalid time format".into()))?;
-        if hours <= 0 || hours > 8760 {
-            return Err(ApiError::BadRequest("Hours must be between 1 and 8760".into()));
-        }
-        Ok(format!(
-            "block_timestamp > NOW() - INTERVAL '{hours} hours'"
-        ))
-    } else if after.ends_with('d') {
-        let days: i64 = after
-            .trim_end_matches('d')
-            .parse()
-            .map_err(|_| ApiError::BadRequest("Invalid time format".into()))?;
-        if days <= 0 || days > 365 {
-            return Err(ApiError::BadRequest("Days must be between 1 and 365".into()));
-        }
-        Ok(format!(
-            "block_timestamp > NOW() - INTERVAL '{days} days'"
-        ))
-    } else {
-        let parsed = chrono::DateTime::parse_from_rfc3339(after)
-            .map_err(|_| ApiError::BadRequest("Invalid timestamp format. Use RFC3339 or relative time (e.g., '1h', '7d')".into()))?;
-        Ok(format!("block_timestamp > '{}'", parsed.to_rfc3339()))
-    }
 }
 
 /// Inject a block number filter into SQL query for live streaming.

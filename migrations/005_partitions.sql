@@ -1,3 +1,0 @@
--- Placeholder for dynamic partition creation
--- Partitions will be created dynamically as sync progresses
--- This file exists to ensure the migration order is correct

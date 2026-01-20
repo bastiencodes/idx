@@ -52,16 +52,17 @@ async fn test_sync_state_persisted() {
 
     engine.sync_block(10).await.expect("Failed to sync block");
 
+    let chain_id = tempo.chain_id().await.expect("Failed to get chain ID");
+
     let conn = db.pool.get().await.expect("Failed to get connection");
     let state = conn
         .query_one(
-            "SELECT chain_id, head_num, synced_num FROM sync_state WHERE id = 1",
-            &[],
+            "SELECT chain_id, head_num, synced_num FROM sync_state WHERE chain_id = $1",
+            &[&(chain_id as i64)],
         )
         .await
         .expect("Failed to query sync state");
 
-    let chain_id = tempo.chain_id().await.expect("Failed to get chain ID");
     assert_eq!(state.get::<_, i64>(0), chain_id as i64);
     assert_eq!(state.get::<_, i64>(1), 10);
     assert_eq!(state.get::<_, i64>(2), 10);
