@@ -14,8 +14,8 @@ cargo build --release # Release build
 
 ### Test
 ```bash
-# Start test infrastructure (TimescaleDB + Tempo node)
-docker compose -f docker-compose.test.yml up -d
+# Start test infrastructure (PostgreSQL + Tempo node)
+docker compose -f docker/dev/docker-compose.yml up -d postgres tempo
 
 # Wait for services to be healthy
 docker compose -f docker-compose.test.yml ps
@@ -41,7 +41,7 @@ docker run --rm --network host ghcr.io/tempoxyz/tempo-bench:latest \
 
 ### Run (Docker)
 ```bash
-# Production deployment with TimescaleDB, Prometheus, Grafana
+# Production deployment with PostgreSQL, Prometheus, Grafana
 # Edit config.toml to configure chains
 docker compose up -d
 

@@ -24,27 +24,7 @@ CREATE TABLE IF NOT EXISTS txs (
     PRIMARY KEY (block_timestamp, block_num, idx)
 );
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') 
-       AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_partitioned_table pt ON c.oid = pt.partrelid WHERE c.relname = 'txs') THEN
-        PERFORM create_hypertable('txs', by_range('block_timestamp', INTERVAL '7 days'));
-    END IF;
-END $$;
-
 CREATE INDEX IF NOT EXISTS idx_txs_hash ON txs (hash);
 CREATE INDEX IF NOT EXISTS idx_txs_block_num ON txs (block_num);
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
-
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'txs') THEN
-        ALTER TABLE txs SET (
-            timescaledb.compress,
-            timescaledb.compress_segmentby = 'type',
-            timescaledb.compress_orderby = 'block_timestamp DESC, idx'
-        );
-        PERFORM add_compression_policy('txs', INTERVAL '30 days', if_not_exists => true);
-    END IF;
-END $$;

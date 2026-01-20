@@ -1,6 +1,3 @@
-mod auth;
-mod materialize;
-
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -12,7 +9,7 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive, KeepAliveStream},
         IntoResponse, Response, Sse,
     },
-    routing::{delete, get, post},
+    routing::get,
     Json, Router,
 };
 use futures::Stream;
@@ -21,10 +18,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::broadcast::Broadcaster;
-use crate::db::Pool;
+use crate::db::{DuckDbPool, Pool};
 use crate::service::{QueryOptions, QueryResult, SyncStatus};
-
-pub use auth::AdminApiKey;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -33,6 +28,8 @@ pub struct AppState {
     /// Default chain_id (first chain)
     pub default_chain_id: u64,
     pub broadcaster: Arc<Broadcaster>,
+    /// Per-chain DuckDB pools for analytical queries
+    pub duckdb_pools: HashMap<u64, Arc<DuckDbPool>>,
 }
 
 impl AppState {
@@ -40,37 +37,29 @@ impl AppState {
         let id = chain_id.unwrap_or(self.default_chain_id);
         self.pools.get(&id)
     }
+
+    fn get_duckdb_pool(&self, chain_id: Option<u64>) -> Option<&Arc<DuckDbPool>> {
+        let id = chain_id.unwrap_or(self.default_chain_id);
+        self.duckdb_pools.get(&id)
+    }
 }
 
 pub fn router(pools: HashMap<u64, Pool>, default_chain_id: u64, broadcaster: Arc<Broadcaster>) -> Router {
-    router_with_admin_key(pools, default_chain_id, broadcaster, None)
+    router_with_options(pools, default_chain_id, broadcaster, HashMap::new())
 }
 
-pub fn router_with_admin_key(
+pub fn router_with_options(
     pools: HashMap<u64, Pool>,
     default_chain_id: u64,
     broadcaster: Arc<Broadcaster>,
-    admin_api_key: Option<String>,
+    duckdb_pools: HashMap<u64, Arc<DuckDbPool>>,
 ) -> Router {
-    let state = AppState { pools, default_chain_id, broadcaster };
+    let state = AppState { pools, default_chain_id, broadcaster, duckdb_pools };
 
-    let mut router = Router::new()
+    Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
-        .route("/query", get(handle_query));
-
-    // Add protected /materialize routes if admin key is configured
-    if let Some(key) = admin_api_key {
-        router = router
-            .route(
-                "/materialize",
-                post(materialize::handle_create_view).get(materialize::handle_list_views),
-            )
-            .route("/materialize", delete(materialize::handle_delete_view))
-            .layer(axum::Extension(AdminApiKey(key)));
-    }
-
-    router
+        .route("/query", get(handle_query))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -84,6 +73,16 @@ async fn handle_health() -> &'static str {
 struct StatusResponse {
     ok: bool,
     chains: Vec<SyncStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duckdb: Option<DuckDbStatus>,
+}
+
+#[derive(Serialize)]
+struct DuckDbStatus {
+    enabled: bool,
+    latest_block: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lag_blocks: Option<i64>,
 }
 
 async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
@@ -95,9 +94,25 @@ async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusRespo
         }
     }
 
+    // Get DuckDB status from the default chain if enabled
+    let duckdb = if let Some(duckdb_pool) = state.get_duckdb_pool(None) {
+        let duck_status = crate::sync::get_sync_status(duckdb_pool).await.ok();
+        let pg_latest = all_chains.first().map(|c| c.synced_num).unwrap_or(0);
+        let duck_latest = duck_status.as_ref().map(|s| s.latest_block).unwrap_or(0);
+
+        Some(DuckDbStatus {
+            enabled: true,
+            latest_block: duck_latest,
+            lag_blocks: Some(pg_latest - duck_latest),
+        })
+    } else {
+        None
+    };
+
     Ok(Json(StatusResponse {
         ok: true,
         chains: all_chains,
+        duckdb,
     }))
 }
 
@@ -121,6 +136,9 @@ pub struct QueryParams {
     /// Maximum rows to return
     #[serde(default = "default_limit")]
     limit: i64,
+    /// Force a specific engine: "postgres" or "duckdb"
+    #[serde(default)]
+    engine: Option<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -165,11 +183,13 @@ async fn handle_query_once(
         limit: params.limit.clamp(1, 100000),
     };
 
-    let result = crate::service::execute_query(
+    let result = crate::service::execute_query_with_engine(
         pool,
+        state.get_duckdb_pool(params.chain_id),
         &params.sql,
         params.signature.as_deref(),
         &options,
+        params.engine.as_deref(),
     )
     .await
     .map_err(|e| {
@@ -216,8 +236,8 @@ async fn handle_query_live(
     let stream = async_stream::stream! {
         let mut last_block_num: u64 = 0;
 
-        // Execute initial query
-        match crate::service::execute_query(&pool, &sql, signature.as_deref(), &options).await {
+        // Execute initial query (DuckDB not used in live queries - need fresh data)
+        match crate::service::execute_query(&pool, None, &sql, signature.as_deref(), &options).await {
             Ok(result) => {
                 yield Ok(SseEvent::default()
                     .event("result")
@@ -253,7 +273,7 @@ async fn handle_query_live(
 
                     for block_num in start..=end {
                         let filtered_sql = inject_block_filter(&sql, block_num);
-                        match crate::service::execute_query(&pool, &filtered_sql, signature.as_deref(), &options).await {
+                        match crate::service::execute_query(&pool, None, &filtered_sql, signature.as_deref(), &options).await {
                             Ok(result) => {
                                 yield Ok(SseEvent::default()
                                     .event("result")
@@ -342,6 +362,7 @@ pub enum ApiError {
     BadRequest(String),
     Timeout,
     QueryError(String),
+    #[allow(dead_code)]
     Internal(String),
 }
 

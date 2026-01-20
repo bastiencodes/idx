@@ -1,6 +1,6 @@
 services:
-  timescaledb:
-    image: timescale/timescaledb:latest-pg16
+  postgres:
+    image: postgres:16
     environment:
       POSTGRES_USER: ak47
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ak47}
@@ -8,7 +8,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - timescaledb_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ak47 -d ak47"]
       interval: 5s
@@ -29,12 +29,14 @@ services:
       - "9090:9090"   # Prometheus metrics
     volumes:
       - ./config.toml:/config.toml:ro
+      - duckdb_data:/data
     depends_on:
-      timescaledb:
+      postgres:
         condition: service_healthy
     environment:
       RUST_LOG: ${RUST_LOG:-ak47=info}
     restart: unless-stopped
 
 volumes:
-  timescaledb_data:
+  postgres_data:
+  duckdb_data:

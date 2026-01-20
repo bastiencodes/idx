@@ -10,9 +10,9 @@ use tracing::info;
 use ak47::api;
 use ak47::broadcast::Broadcaster;
 use ak47::config::Config;
-use ak47::db;
-
+use ak47::db::{self, DuckDbPool};
 use ak47::sync::engine::SyncEngine;
+use ak47::sync::{Replicator, ReplicatorHandle};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -24,8 +24,10 @@ pub struct Args {
 pub async fn run(args: Args) -> Result<()> {
     let config = Config::load(&args.config)?;
 
+    let duckdb_count = config.chains.iter().filter(|c| c.duckdb_path.is_some()).count();
     info!(
         chains = config.chains.len(),
+        duckdb_chains = duckdb_count,
         "Loaded config"
     );
 
@@ -53,38 +55,48 @@ pub async fn run(args: Args) -> Result<()> {
     // Create pools and run migrations for each chain
     let mut chain_pools = Vec::new();
     let mut pools_map = std::collections::HashMap::new();
+    let mut duckdb_pools_map = std::collections::HashMap::new();
     let mut default_chain_id = 0u64;
 
     for chain in &config.chains {
         info!(chain = %chain.name, db = %chain.database_url, "Connecting to database...");
         let pool = db::create_pool(&chain.database_url).await?;
-        
+
         info!(chain = %chain.name, "Running migrations...");
         db::run_migrations(&pool).await?;
-        
+
+        // Initialize per-chain DuckDB if configured
+        let replicator_handle: Option<ReplicatorHandle> = if let Some(ref duckdb_path) = chain.duckdb_path {
+            info!(chain = %chain.name, path = %duckdb_path, "Initializing DuckDB");
+            let duckdb_pool = Arc::new(DuckDbPool::new(duckdb_path)?);
+
+            // Create replicator for syncing Postgres -> DuckDB
+            let (replicator, handle) = Replicator::new(duckdb_pool.clone(), 1000);
+
+            // Spawn replicator task
+            tokio::spawn(replicator.run());
+
+            duckdb_pools_map.insert(chain.chain_id, duckdb_pool);
+            Some(handle)
+        } else {
+            None
+        };
+
         if default_chain_id == 0 {
             default_chain_id = chain.chain_id;
         }
         pools_map.insert(chain.chain_id, pool.clone());
-        chain_pools.push((chain.clone(), pool));
+        chain_pools.push((chain.clone(), pool, replicator_handle));
     }
 
     // Start HTTP API with all chain pools
     if config.http.enabled {
         if !pools_map.is_empty() {
             let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
-            let router = api::router_with_admin_key(
-                pools_map,
-                default_chain_id,
-                broadcaster.clone(),
-                config.http.admin_api_key.clone(),
-            );
+            let router =
+                api::router_with_options(pools_map, default_chain_id, broadcaster.clone(), duckdb_pools_map);
 
-            if config.http.admin_api_key.is_some() {
-                info!(addr = %addr, "Starting HTTP API server (admin endpoints enabled)");
-            } else {
-                info!(addr = %addr, "Starting HTTP API server");
-            }
+            info!(addr = %addr, "Starting HTTP API server");
 
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let mut shutdown_rx_api = shutdown_tx.subscribe();
@@ -103,7 +115,7 @@ pub async fn run(args: Args) -> Result<()> {
     // Spawn a sync engine for each chain
     let mut handles = Vec::new();
 
-    for (chain, pool) in chain_pools {
+    for (chain, pool, replicator_handle) in chain_pools {
         let broadcaster = broadcaster.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let backfill_shutdown_rx = shutdown_tx.subscribe();
@@ -113,11 +125,19 @@ pub async fn run(args: Args) -> Result<()> {
             chain_id = chain.chain_id,
             rpc = %chain.rpc_url,
             backfill = chain.backfill,
+            duckdb = chain.duckdb_path.is_some(),
             "Starting sync for chain"
         );
 
         let handle = tokio::spawn(async move {
             let engine = SyncEngine::new(pool.clone(), &chain.rpc_url).await?;
+
+            // Optionally attach replicator for DuckDB sync
+            let engine = if let Some(ref handle) = replicator_handle {
+                engine.with_replicator(handle.clone())
+            } else {
+                engine
+            };
 
             // Start backfill if enabled and not complete
             if chain.backfill {
@@ -168,6 +188,11 @@ pub async fn run(args: Args) -> Result<()> {
             let mut engine = SyncEngine::new(pool, &chain.rpc_url)
                 .await?
                 .with_broadcaster(broadcaster);
+
+            if let Some(handle) = replicator_handle {
+                engine = engine.with_replicator(handle);
+            }
+
             engine.run(shutdown_rx).await
         });
 

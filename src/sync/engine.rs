@@ -12,6 +12,7 @@ use crate::types::SyncState;
 
 use super::decoder::{decode_block, decode_log, decode_receipt, decode_transaction, timestamp_from_secs};
 use super::fetcher::RpcClient;
+use super::replicator::ReplicatorHandle;
 use super::writer::{
     detect_gaps, get_block_hash, load_sync_state, save_sync_state, write_block, write_blocks,
     write_logs, write_receipts, write_txs,
@@ -22,6 +23,7 @@ pub struct SyncEngine {
     rpc: RpcClient,
     chain_id: u64,
     broadcaster: Option<Arc<Broadcaster>>,
+    replicator: Option<ReplicatorHandle>,
 }
 
 impl SyncEngine {
@@ -36,11 +38,17 @@ impl SyncEngine {
             rpc,
             chain_id,
             broadcaster: None,
+            replicator: None,
         })
     }
 
     pub fn with_broadcaster(mut self, broadcaster: Arc<Broadcaster>) -> Self {
         self.broadcaster = Some(broadcaster);
+        self
+    }
+
+    pub fn with_replicator(mut self, replicator: ReplicatorHandle) -> Self {
+        self.replicator = Some(replicator);
         self
     }
 
@@ -105,11 +113,23 @@ impl SyncEngine {
             };
 
             // Write current batch (overlapped with next fetch)
+            let replicator = self.replicator.clone();
+            let block_rows_clone = block_rows.clone();
+            let all_txs_clone = all_txs.clone();
+            let all_logs_clone = all_logs.clone();
             let write_future = async {
                 write_blocks(&self.pool, &block_rows).await?;
                 write_txs(&self.pool, &all_txs).await?;
                 write_logs(&self.pool, &all_logs).await?;
                 write_receipts(&self.pool, &all_receipts).await?;
+
+                // Replicate to DuckDB if enabled
+                if let Some(ref rep) = replicator {
+                    rep.send_blocks(block_rows_clone).await.ok();
+                    rep.send_txs(all_txs_clone).await.ok();
+                    rep.send_logs(all_logs_clone).await.ok();
+                }
+
                 Ok::<_, anyhow::Error>(())
             };
 

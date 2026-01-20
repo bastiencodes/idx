@@ -1,9 +1,9 @@
+mod duckdb;
 mod pool;
 mod schema;
-mod views;
 
+pub use self::duckdb::{execute_query as execute_duckdb_query, DuckDbPool};
 pub use pool::create_pool;
 pub use schema::run_migrations;
-pub use views::{list_materialized_views, refresh_materialized_views};
 
 pub type Pool = deadpool_postgres::Pool;

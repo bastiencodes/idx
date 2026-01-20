@@ -14,12 +14,13 @@
 
 ---
 
-**ak47** indexes [Tempo](https://tempo.xyz) chain data into Postgres (TimescaleDB) for fast point lookups (OLTP) and analytics (OLAP). 
+**ak47** indexes [Tempo](https://tempo.xyz) chain data into a hybrid PostgreSQL + DuckDB architecture for fast point lookups (OLTP) and lightning-fast analytics (OLAP). 
 
 ## Features
 
 - **Bidirectional Sync** — Follow chain head in realtime while backfilling history concurrently
-- **Hybrid Storage** — Row format for recent OLTP, columnar compression for historical OLAP
+- **Hybrid Query Routing** — Automatic routing to DuckDB for analytics, PostgreSQL for point lookups
+- **Dual Storage** — TimescaleDB for OLTP + DuckDB columnar for OLAP
 - **Continuous Aggregates** — Materialized views that auto-refresh for instant analytics
 - **Event Decoding** — Query decoded events by ABI signature (no pre-registration)
 - **HTTP API + CLI** — Query data via REST, SQL, or command line
@@ -29,15 +30,13 @@
 
 - [Quickstart](#quickstart)
 - [How It Works](#how-it-works)
+- [Query Routing](#query-routing)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [CLI Reference](#cli-reference)
 - [HTTP API](#http-api)
 - [Query Cookbook](#query-cookbook)
 - [Database Schema](#database-schema)
-- [Continuous Aggregates](#continuous-aggregates)
-- [Operations](#operations)
-- [Performance](#performance)
 - [Development](#development)
 - [License](#license)
 
@@ -97,28 +96,93 @@ Chain:    [0]----[1]----[2]----...----[HEAD-1]----[HEAD]----[HEAD+1]
 
 Both syncs persist progress to `sync_state`, so interrupted syncs resume automatically.
 
-### Hybrid Storage
+### Dual Database Architecture
 
-Recent data stays in row format for fast writes and point queries. Older chunks auto-compress to columnar format for analytics:
+ak47 uses a hybrid architecture with two databases working together:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                                                             │
-│   HOT DATA (row format)              COLD DATA (columnar, compressed)       │
-│  ┌─────┬─────┬─────┬─────┐          ┌─────────────────────────────────┐     │
-│  │ now │ -1h │ -2h │ ... │   ───►   │  -30d  │  -60d  │  -90d  │ ...  │     │
-│  └─────┴─────┴─────┴─────┘          └─────────────────────────────────┘     │
-│     Fast writes + OLTP                  10-20x smaller + fast OLAP          │
+│   PostgreSQL (TimescaleDB)                 DuckDB                           │
+│  ┌─────────────────────────────┐          ┌─────────────────────────────┐   │
+│  │  • System of record         │          │  • Analytical replica       │   │
+│  │  • ACID transactions        │  ──────► │  • Columnar storage         │   │
+│  │  • Point lookups (< 1ms)    │   sync   │  • Aggregations (10-100x)   │   │
+│  │  • Indexed queries          │          │  • Window functions         │   │
+│  └─────────────────────────────┘          └─────────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why TimescaleDB?
+**PostgreSQL/TimescaleDB** handles:
+- All writes (system of record)
+- Point lookups by hash, address, block number
+- Recent data queries
+- Transactions and ACID guarantees
 
-- **Hypertables** — Auto-partitioned by timestamp for efficient time-range queries
-- **Compression** — Columnar storage reduces size 10-20x, speeds up aggregations
-- **Continuous Aggregates** — Materialized views that auto-refresh on schedule
-- **Full SQL** — No custom query language, just Postgres
+**DuckDB** handles:
+- Aggregations (`GROUP BY`, `COUNT`, `SUM`, `AVG`)
+- Window functions (`ROW_NUMBER`, `RANK`, `OVER`)
+- Large table scans and joins
+- Analytical queries over millions of rows
+
+## Query Routing
+
+Queries are **automatically routed** to the optimal engine based on SQL patterns:
+
+| Pattern | Engine | Why |
+|---------|--------|-----|
+| `WHERE hash = '0x...'` | PostgreSQL | Indexed point lookup |
+| `WHERE address = '0x...'` | PostgreSQL | Indexed lookup |
+| `WHERE block_num = 123` | PostgreSQL | Indexed lookup |
+| `GROUP BY` / `HAVING` | DuckDB | Columnar aggregation |
+| `COUNT(*)`, `SUM()`, `AVG()` | DuckDB | Vectorized execution |
+| `ROW_NUMBER() OVER (...)` | DuckDB | Optimized window functions |
+| Multiple `JOIN`s | DuckDB | Columnar join optimization |
+
+### Explicit Engine Control
+
+Force a specific engine via SQL comment or query parameter:
+
+```sql
+-- Force DuckDB
+/* engine=duckdb */ SELECT COUNT(*) FROM txs;
+
+-- Force PostgreSQL (for freshest data)
+/* engine=postgres */ SELECT * FROM blocks ORDER BY num DESC LIMIT 1;
+```
+
+Via HTTP API:
+```bash
+# Force PostgreSQL
+curl "/query?sql=SELECT...&engine=postgres"
+
+# Force DuckDB
+curl "/query?sql=SELECT...&engine=duckdb"
+```
+
+### Status Endpoint
+
+The `/status` endpoint shows sync status for both engines:
+
+```json
+{
+  "ok": true,
+  "chains": [...],
+  "duckdb": {
+    "enabled": true,
+    "latest_block": 999950,
+    "lag_blocks": 50
+  }
+}
+```
+
+### Why This Architecture?
+
+- **Best of both worlds** — Sub-millisecond point lookups AND fast analytics
+- **Isolation** — Analytical queries don't impact OLTP latency
+- **Simplicity** — Automatic routing, no manual query optimization
+- **Consistency** — PostgreSQL is source of truth, DuckDB is derived
 
 ## Installation
 
@@ -251,13 +315,6 @@ ak47 query "SELECT COUNT(*) FROM txs"
 ak47 query \
   --signature "Transfer(address indexed from, address indexed to, uint256 value)" \
   "SELECT * FROM Transfer LIMIT 10"
-
-# Create a continuous aggregate
-ak47 materialize create tx_volume_hourly \
-  --sql "SELECT time_bucket('1 hour', block_timestamp) AS hour, COUNT(*) as tx_count FROM txs GROUP BY hour"
-
-# List aggregates
-ak47 materialize list
 ```
 
 ## HTTP API
@@ -267,21 +324,39 @@ ak47 materialize list
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/status` | GET | Sync status for all chains |
-| `/query` | GET | Execute SQL query |
+| `/status` | GET | Sync status for all chains + DuckDB |
+| `/query` | GET | Execute SQL query (auto-routed) |
 | `/metrics` | GET | Prometheus metrics |
+
+### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sql` | string | required | SQL query (SELECT only) |
+| `signature` | string | - | Event signature for CTE generation |
+| `chainId` | number | first chain | Chain ID to query |
+| `engine` | string | auto | Force engine: `postgres` or `duckdb` |
+| `timeout_ms` | number | 5000 | Query timeout in milliseconds |
+| `limit` | number | 10000 | Maximum rows to return |
 
 ### Examples
 
 ```bash
-# Simple query
-curl "http://localhost:8080/query?sql=SELECT * FROM blocks LIMIT 5"
+# Simple query (auto-routed to PostgreSQL - point lookup)
+curl "http://localhost:8080/query?sql=SELECT * FROM blocks WHERE num = 12345"
 
-# Response
+# Aggregation query (auto-routed to DuckDB)
+curl "http://localhost:8080/query?sql=SELECT COUNT(*) FROM txs GROUP BY type"
+
+# Force PostgreSQL for freshest data
+curl "http://localhost:8080/query?sql=SELECT * FROM blocks ORDER BY num DESC LIMIT 1&engine=postgres"
+
+# Response includes which engine was used
 {
   "columns": ["num", "hash", "timestamp", ...],
   "rows": [[123, "0x...", "2024-01-01T00:00:00Z", ...]],
   "row_count": 5,
+  "engine": "duckdb",
   "ok": true
 }
 ```
@@ -289,16 +364,21 @@ curl "http://localhost:8080/query?sql=SELECT * FROM blocks LIMIT 5"
 ```bash
 curl http://localhost:8080/status
 
-# Response
+# Response includes DuckDB sync status
 {
+  "ok": true,
   "chains": [{
-    "name": "mainnet",
     "chain_id": 4217,
     "synced_num": 567890,
     "head_num": 567890,
     "backfill_num": 123456,
     "lag": 0
-  }]
+  }],
+  "duckdb": {
+    "enabled": true,
+    "latest_block": 567840,
+    "lag_blocks": 50
+  }
 }
 ```
 
@@ -330,12 +410,12 @@ LIMIT 20;
 
 ### OLAP (Analytics)
 
-These queries scan raw data. For large datasets, create [continuous aggregates](#continuous-aggregates) to pre-compute results.
+These queries are automatically routed to DuckDB for fast columnar execution:
 
 ```sql
 -- Transactions per hour (last 24h)
 SELECT 
-  time_bucket('1 hour', block_timestamp) AS hour,
+  DATE_TRUNC('hour', block_timestamp) AS hour,
   COUNT(*) AS tx_count
 FROM txs
 WHERE block_timestamp > NOW() - INTERVAL '24 hours'
@@ -344,7 +424,7 @@ ORDER BY hour DESC;
 
 -- Gas usage trend (last 30 days)
 SELECT 
-  time_bucket('1 day', timestamp) AS day,
+  DATE_TRUNC('day', timestamp) AS day,
   SUM(gas_used) AS total_gas,
   AVG(gas_used)::bigint AS avg_gas
 FROM blocks
@@ -364,7 +444,7 @@ LIMIT 20;
 
 -- Unique active addresses per day
 SELECT 
-  time_bucket('1 day', block_timestamp) AS day,
+  DATE_TRUNC('day', block_timestamp) AS day,
   COUNT(DISTINCT "from") AS unique_senders
 FROM txs
 GROUP BY day
@@ -383,7 +463,7 @@ ak47 query \
 
 ## Database Schema
 
-All tables are TimescaleDB hypertables partitioned by `timestamp`/`block_timestamp`:
+All tables use composite primary keys with timestamps for efficient range queries:
 
 ### blocks
 
@@ -434,69 +514,6 @@ All tables are TimescaleDB hypertables partitioned by `timestamp`/`block_timesta
 | `synced_num` | INT8 | Highest synced block |
 | `backfill_num` | INT8 | Lowest synced block |
 
-## Continuous Aggregates
-
-Pre-compute analytics for instant queries on large datasets using TimescaleDB continuous aggregates.
-
-### Creating Aggregates
-
-Create with the CLI:
-
-```bash
-# Create aggregate
-ak47 materialize create txs_daily \
-  --sql "SELECT time_bucket('1 day', block_timestamp) AS day, COUNT(*) AS count FROM txs GROUP BY day" \
-  --refresh-interval "1 hour" \
-  --refresh-start "3 days"
-
-# List all aggregates
-ak47 materialize list
-
-# Get info about an aggregate
-ak47 materialize info txs_hourly
-
-# Manually refresh
-ak47 materialize refresh txs_hourly --full
-
-# Drop an aggregate
-ak47 materialize drop txs_daily
-```
-
-### Querying Aggregates
-
-```sql
--- Recent daily transaction counts by type
-SELECT * FROM txs_daily ORDER BY day DESC LIMIT 30;
-
--- Compare with previous period
-SELECT 
-  day,
-  tx_count,
-  LAG(tx_count) OVER (ORDER BY day) AS prev_day,
-  tx_count - LAG(tx_count) OVER (ORDER BY day) AS change
-FROM tx_volume_hourly
-WHERE day > NOW() - INTERVAL '7 days';
-
--- Join aggregate with raw data for drill-down
-SELECT 
-  agg.day,
-  agg.tx_count,
-  COUNT(*) FILTER (WHERE t.type = 118) AS tempo_txs
-FROM txs_daily agg
-JOIN txs t ON time_bucket('1 day', t.block_timestamp) = agg.day
-WHERE agg.day > NOW() - INTERVAL '7 days'
-GROUP BY agg.day, agg.tx_count
-ORDER BY agg.day DESC;
-
--- Aggregate of aggregates (weekly from daily)
-SELECT 
-  time_bucket('1 week', day) AS week,
-  SUM(tx_count) AS weekly_txs
-FROM txs_daily
-GROUP BY week
-ORDER BY week DESC;
-```
-
 ## Development
 
 ### Prerequisites
@@ -508,7 +525,7 @@ ORDER BY week DESC;
 ### Make Commands
 
 ```bash
-make up                  # Start devnet (TimescaleDB + Tempo)
+make up                  # Start devnet (PostgreSQL + Tempo)
 make down                # Stop services
 make test                # Run tests
 make bench               # Run benchmarks
@@ -524,12 +541,22 @@ make clean               # Stop services + clean build
 src/
 ├── api/          # HTTP API (axum)
 ├── cli/          # CLI commands
-├── db/           # Database pool + schema
-├── sync/         # Sync engine, fetcher, writer
+├── db/           # Database pools (PostgreSQL + DuckDB)
+│   ├── pool.rs      # PostgreSQL connection pool
+│   ├── duckdb.rs    # DuckDB pool + schema + ABI macros
+│   └── schema.rs    # PostgreSQL migrations
+├── query/        # Query parsing and routing
+│   ├── parser.rs    # Event signature parser + CTE generation
+│   └── router.rs    # OLTP/OLAP query routing logic
+├── sync/         # Sync engine
+│   ├── engine.rs    # Bidirectional sync orchestration
+│   ├── fetcher.rs   # RPC data fetching
+│   ├── writer.rs    # PostgreSQL batch writer
+│   └── replicator.rs # DuckDB sync replication
 ├── service/      # Shared business logic
 └── types.rs      # Core data types
 
-db/               # SQL migrations
+db/               # PostgreSQL migrations
 tests/            # Integration tests
 benches/          # Benchmarks
 ```
@@ -547,7 +574,7 @@ make test
 cargo test smoke_test -- --test-threads=1
 ```
 
-Tests use real TimescaleDB and Tempo nodes (no mocks).
+Tests use real PostgreSQL and Tempo nodes (no mocks).
 
 ## License
 

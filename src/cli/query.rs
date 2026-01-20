@@ -62,6 +62,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let result = service::execute_query(
         &pool,
+        None, // DuckDB pool not available in CLI yet
         &args.sql,
         args.signature.as_deref(),
         &options,

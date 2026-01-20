@@ -67,7 +67,13 @@ impl EventSignature {
         format!("{}({})", name, param_types.join(","))
     }
 
+    /// Generate PostgreSQL-compatible CTE SQL
     pub fn to_cte_sql(&self) -> String {
+        self.to_cte_sql_postgres()
+    }
+
+    /// Generate PostgreSQL-compatible CTE SQL (uses bytea and abi_* functions)
+    pub fn to_cte_sql_postgres(&self) -> String {
         let mut selects = Vec::new();
         let mut topic_idx = 2; // topic0 is selector (topics[1] in PG), first indexed param is topics[2]
         let mut data_offset = 0;
@@ -78,11 +84,11 @@ impl EventSignature {
                 .as_deref().map_or_else(|| format!("arg{i}"), |n| n.to_string());
 
             let decode_expr = if param.indexed {
-                let expr = param.ty.topic_decode_sql(topic_idx);
+                let expr = param.ty.topic_decode_sql_postgres(topic_idx);
                 topic_idx += 1;
                 expr
             } else {
-                let expr = param.ty.data_decode_sql(data_offset);
+                let expr = param.ty.data_decode_sql_postgres(data_offset);
                 data_offset += 32;
                 expr
             };
@@ -101,6 +107,48 @@ impl EventSignature {
     SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address{select_clause}
     FROM logs
     WHERE selector = '\x{topic0}'
+)"#,
+            name = self.name,
+            select_clause = select_clause,
+            topic0 = self.topic0_hex(),
+        )
+    }
+
+    /// Generate DuckDB-compatible CTE SQL (uses VARCHAR hex strings and macros)
+    pub fn to_cte_sql_duckdb(&self) -> String {
+        let mut selects = Vec::new();
+        let mut topic_idx = 2; // topics[1] is selector, first indexed param is topics[2]
+        let mut data_offset = 0;
+
+        for (i, param) in self.params.iter().enumerate() {
+            let col_name = param
+                .name
+                .as_deref().map_or_else(|| format!("arg{i}"), |n| n.to_string());
+
+            let decode_expr = if param.indexed {
+                let expr = param.ty.topic_decode_sql_duckdb(topic_idx);
+                topic_idx += 1;
+                expr
+            } else {
+                let expr = param.ty.data_decode_sql_duckdb(data_offset);
+                data_offset += 32;
+                expr
+            };
+
+            selects.push(format!("{decode_expr} AS \"{col_name}\""));
+        }
+
+        let select_clause = if selects.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", selects.join(", "))
+        };
+
+        format!(
+            r#""{name}" AS (
+    SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address{select_clause}
+    FROM logs
+    WHERE selector = '0x{topic0}'
 )"#,
             name = self.name,
             select_clause = select_clause,
@@ -286,7 +334,9 @@ impl AbiType {
         }
     }
 
-    pub fn topic_decode_sql(&self, topic_idx: usize) -> String {
+    // PostgreSQL decode functions (bytea-based)
+
+    pub fn topic_decode_sql_postgres(&self, topic_idx: usize) -> String {
         match self {
             AbiType::Address => format!("abi_address(topics[{topic_idx}])"),
             AbiType::Uint(_) | AbiType::Int(_) => format!("abi_uint(topics[{topic_idx}])"),
@@ -296,7 +346,7 @@ impl AbiType {
         }
     }
 
-    pub fn data_decode_sql(&self, offset: usize) -> String {
+    pub fn data_decode_sql_postgres(&self, offset: usize) -> String {
         let start = offset + 1;
         match self {
             AbiType::Address => format!("abi_address(substring(data FROM {start} FOR 32))"),
@@ -312,6 +362,30 @@ impl AbiType {
             }
             AbiType::String => format!("abi_string(data, {offset})"),
             _ => format!("substring(data FROM {start} FOR 32)"),
+        }
+    }
+
+    // DuckDB decode functions (VARCHAR hex string-based)
+
+    pub fn topic_decode_sql_duckdb(&self, topic_idx: usize) -> String {
+        match self {
+            AbiType::Address => format!("topic_address(topics[{topic_idx}])"),
+            AbiType::Uint(_) | AbiType::Int(_) => format!("topic_uint(topics[{topic_idx}])"),
+            AbiType::Bool => format!("topics[{topic_idx}] != '0x0000000000000000000000000000000000000000000000000000000000000000'"),
+            AbiType::Bytes(Some(_) | None) => format!("topics[{topic_idx}]"),
+            _ => format!("topics[{topic_idx}]"),
+        }
+    }
+
+    pub fn data_decode_sql_duckdb(&self, offset: usize) -> String {
+        match self {
+            AbiType::Address => format!("abi_address(data, {offset})"),
+            AbiType::Uint(_) => format!("abi_uint(data, {offset})"),
+            AbiType::Int(_) => format!("abi_uint(data, {offset})"), // TODO: proper signed handling
+            AbiType::Bool => format!("abi_bool(data, {offset})"),
+            AbiType::Bytes(Some(_) | None) => format!("abi_bytes32(data, {offset})"),
+            AbiType::String => format!("abi_bytes32(data, {offset})"), // TODO: dynamic string support
+            _ => format!("abi_bytes32(data, {offset})"),
         }
     }
 }
@@ -396,5 +470,20 @@ mod tests {
         .unwrap();
         let canonical = EventSignature::canonical_signature(&sig.name, &sig.params);
         assert_eq!(canonical, "Transfer(address,address,uint256)");
+    }
+
+    #[test]
+    fn test_cte_generation_duckdb() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+        let cte = sig.to_cte_sql_duckdb();
+        assert!(cte.contains("\"Transfer\""));
+        assert!(cte.contains("topic_address(topics[2])"));
+        assert!(cte.contains("topic_address(topics[3])"));
+        assert!(cte.contains("abi_uint(data, 0)"));
+        // DuckDB uses '0x...' format instead of '\x...'
+        assert!(cte.contains("selector = '0xddf252ad"));
     }
 }
