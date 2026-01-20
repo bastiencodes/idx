@@ -72,8 +72,7 @@ fn generate_logs(count: usize, block_num: i64) -> Vec<LogRow> {
 fn bench_batch_writes(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string());
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let pool = rt.block_on(async {
         let pool = create_pool(&db_url).await.expect("Failed to create pool");
@@ -150,8 +149,7 @@ fn bench_batch_writes(c: &mut Criterion) {
 fn bench_mixed_workload(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string());
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let pool = rt.block_on(async {
         let pool = create_pool(&db_url).await.expect("Failed to create pool");
@@ -215,8 +213,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 fn bench_copy_throughput(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string());
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let pool = rt.block_on(async {
         let pool = create_pool(&db_url).await.expect("Failed to create pool");

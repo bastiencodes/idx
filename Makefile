@@ -14,11 +14,11 @@ TPS ?= 100
 # ============================================================================
 
 # Start all services (TimescaleDB + Tempo + Indexer)
-up: build
+up:
 	@$(COMPOSE) up -d
 	@echo "Waiting for TimescaleDB..."
-	@until $(COMPOSE) exec -T timescaledb pg_isready -U ak47 -d ak47_test > /dev/null 2>&1; do sleep 1; done
-	@echo "✓ Ready. Run: ./ak47 --help"
+	@until $(COMPOSE) exec -T timescaledb pg_isready -U ak47 -d ak47 > /dev/null 2>&1; do sleep 1; done
+	@echo "✓ Ready."
 
 # Stop all services
 down:
@@ -63,20 +63,20 @@ seed-heavy:
 # Seed and sync: generate txs then index them
 seed-and-sync: seed-heavy
 	@echo "Syncing indexed data..."
-	@./ak47 up --rpc http://localhost:8545 --db postgres://ak47:ak47@localhost:5433/ak47_test &
+	@./ak47 up --rpc http://localhost:8545 --db postgres://ak47:ak47@localhost:5433/ak47 &
 	@PID=$$!; sleep 30; kill $$PID 2>/dev/null || true
 	@echo "✓ Seeded and synced"
 
 # Reset database
 reset:
 	@echo "Dropping and recreating database..."
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "DROP DATABASE IF EXISTS ak47_test" > /dev/null
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "CREATE DATABASE ak47_test" > /dev/null
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "DROP DATABASE IF EXISTS ak47" > /dev/null
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "CREATE DATABASE ak47" > /dev/null
 	@echo "✓ Database reset"
 
 # Open psql shell
 psql:
-	@$(COMPOSE) exec timescaledb psql -U ak47 -d ak47_test
+	@$(COMPOSE) exec timescaledb psql -U ak47 -d ak47
 
 # ============================================================================
 # Build & Test
@@ -102,7 +102,7 @@ BENCH_ARTIFACT ?= .bench_seed.dump
 
 # Check if benchmark data exists, restore from artifact or generate fresh
 define check_bench_data
-	@TX_COUNT=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47_test -tAc "SELECT COUNT(*) FROM txs" 2>/dev/null || echo "0"); \
+	@TX_COUNT=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47 -tAc "SELECT COUNT(*) FROM txs" 2>/dev/null || echo "0"); \
 	if [ "$$TX_COUNT" -ge 1000000 ]; then \
 		echo "Using existing data ($$TX_COUNT txs)"; \
 	elif [ -f "$(BENCH_ARTIFACT)" ]; then \
@@ -169,10 +169,10 @@ bench-gen-compressed:
 _bench_restore:
 	@$(COMPOSE) up -d timescaledb
 	@until $(COMPOSE) exec -T timescaledb pg_isready -U ak47 -d postgres > /dev/null 2>&1; do sleep 1; done
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "DROP DATABASE IF EXISTS ak47_test WITH (FORCE)" > /dev/null 2>&1 || true
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "CREATE DATABASE ak47_test" > /dev/null
-	@cat $(BENCH_ARTIFACT) | $(COMPOSE) exec -T timescaledb pg_restore -U ak47 -d ak47_test --no-owner --no-acl 2>/dev/null || true
-	@TX_COUNT=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47_test -tAc "SELECT COUNT(*) FROM txs"); \
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "DROP DATABASE IF EXISTS ak47 WITH (FORCE)" > /dev/null 2>&1 || true
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "CREATE DATABASE ak47" > /dev/null
+	@cat $(BENCH_ARTIFACT) | $(COMPOSE) exec -T timescaledb pg_restore -U ak47 -d ak47 --no-owner --no-acl 2>/dev/null || true
+	@TX_COUNT=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47 -tAc "SELECT COUNT(*) FROM txs"); \
 	echo "Restored $$TX_COUNT txs from artifact"
 
 # Internal: seed fresh (slow, used when no artifact exists)
@@ -180,12 +180,12 @@ _bench_seed:
 	@$(COMPOSE) up -d timescaledb
 	@echo "Waiting for TimescaleDB..."
 	@until $(COMPOSE) exec -T timescaledb pg_isready -U ak47 -d postgres > /dev/null 2>&1; do sleep 1; done
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "DROP DATABASE IF EXISTS ak47_test WITH (FORCE)" > /dev/null 2>&1 || true
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "CREATE DATABASE ak47_test" > /dev/null
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "DROP DATABASE IF EXISTS ak47 WITH (FORCE)" > /dev/null 2>&1 || true
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d postgres -c "CREATE DATABASE ak47" > /dev/null
 	@echo "Seeding $(BENCH_TXS) synthetic transactions..."
-	@SEED_TXS=$(BENCH_TXS) DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47_test \
+	@SEED_TXS=$(BENCH_TXS) DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47 \
 		cargo test --release --test seed_bench -- --ignored --nocapture
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47_test -c "SELECT COUNT(*) as blocks FROM blocks; SELECT COUNT(*) as txs FROM txs; SELECT COUNT(*) as logs FROM logs;"
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47 -c "SELECT COUNT(*) as blocks FROM blocks; SELECT COUNT(*) as txs FROM txs; SELECT COUNT(*) as logs FROM logs;"
 
 # Run benchmarks (seeds 2M txs if data doesn't exist)
 bench:
@@ -193,7 +193,7 @@ bench:
 	@sleep 2
 	$(call check_bench_data)
 	@echo "=== Running Query Benchmarks ==="
-	@DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47_test cargo bench --bench query_bench
+	@DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47 cargo bench --bench query_bench
 	@echo "Report: target/criterion/report/index.html"
 
 # Run benchmarks on compressed data (requires bench-gen-compressed artifact)
@@ -202,7 +202,7 @@ bench-compressed:
 	@sleep 2
 	$(call check_bench_data)
 	@echo "=== Running Query Benchmarks (Compressed) ==="
-	@DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47_test cargo bench --bench query_bench
+	@DATABASE_URL=postgres://ak47:ak47@localhost:5433/ak47 cargo bench --bench query_bench
 	@echo "Report: target/criterion/report/index.html"
 
 # Run benchmarks and open report
@@ -240,8 +240,8 @@ bench-vs-golden-axe:
 	echo "Chain seeded to block $$CHAIN_HEAD"
 	@echo ""
 	@echo "=== Step 3: Reset databases ==="
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "DROP DATABASE IF EXISTS ak47_test" > /dev/null 2>&1 || true
-	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "CREATE DATABASE ak47_test" > /dev/null
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "DROP DATABASE IF EXISTS ak47" > /dev/null 2>&1 || true
+	@$(COMPOSE) exec -T timescaledb psql -U ak47 -c "CREATE DATABASE ak47" > /dev/null
 	@dropdb --if-exists ga_bench 2>/dev/null || true
 	@createdb ga_bench 2>/dev/null || true
 	@psql ga_bench -f $(GOLDEN_AXE_DIR)/be/src/sql/schema.sql > /dev/null 2>&1
@@ -257,11 +257,11 @@ bench-vs-golden-axe:
 	@START=$$(date +%s); \
 	timeout 600 ./target/release/ak47 up \
 		--rpc http://localhost:8545 \
-		--db postgres://ak47:ak47@localhost:5433/ak47_test 2>&1 | head -100 || true; \
+		--db postgres://ak47:ak47@localhost:5433/ak47 2>&1 | head -100 || true; \
 	END=$$(date +%s); \
 	AK47_TIME=$$((END - START)); \
-	AK47_TXS=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47_test -tAc "SELECT COUNT(*) FROM txs" 2>/dev/null || echo "0"); \
-	AK47_BLOCKS=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47_test -tAc "SELECT COUNT(*) FROM blocks" 2>/dev/null || echo "0"); \
+	AK47_TXS=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47 -tAc "SELECT COUNT(*) FROM txs" 2>/dev/null || echo "0"); \
+	AK47_BLOCKS=$$($(COMPOSE) exec -T timescaledb psql -U ak47 -d ak47 -tAc "SELECT COUNT(*) FROM blocks" 2>/dev/null || echo "0"); \
 	echo "ak47: $$AK47_TXS txs, $$AK47_BLOCKS blocks in $${AK47_TIME}s"; \
 	echo "ak47: $$(echo "scale=0; $$AK47_TXS / $$AK47_TIME" | bc) txs/sec"; \
 	echo "$$AK47_TIME $$AK47_TXS $$AK47_BLOCKS" > /tmp/ak47_result.txt
@@ -325,8 +325,3 @@ help:
 	@echo "  make bench        Run benchmarks (restores from artifact)"
 	@echo "  make bench-compressed  Run benchmarks on compressed data"
 	@echo "  make clean        Stop services and clean"
-	@echo ""
-	@echo "CLI:"
-	@echo "  ./ak47 up                Start indexer + HTTP API"
-	@echo "  ./ak47 status            Show sync status"
-	@echo "  ./ak47 query \"SQL\"       Run a SQL query"

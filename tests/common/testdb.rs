@@ -135,6 +135,5 @@ impl TestDb {
 }
 
 fn get_test_db_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string())
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
 }

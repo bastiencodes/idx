@@ -1,6 +1,6 @@
 # AK47 Test Configuration
 
-database_url = "postgres://ak47:ak47@timescaledb:5432/ak47_test"
+database_url = "postgres://ak47:ak47@timescaledb:5432/ak47"
 
 [http]
 enabled = true

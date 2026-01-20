@@ -98,7 +98,15 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
                     println!("│  ├─ Status:   In progress");
                     println!("│  ├─ Position: block {}", format_number(n));
                     println!("│  ├─ Remaining: {} blocks", format_number(n));
-                    println!("│  └─ Progress: {pct}%");
+                    println!("│  ├─ Progress: {pct}%");
+                    if let Some(rate) = state.sync_rate() {
+                        println!("│  ├─ Rate:     {:.0} blk/s", rate);
+                    }
+                    if let Some(eta) = state.backfill_eta_secs() {
+                        println!("│  └─ ETA:      {}", format_eta(eta));
+                    } else {
+                        println!("│  └─ ETA:      calculating...");
+                    }
                 }
             }
 
@@ -139,6 +147,8 @@ async fn print_json_status(config: &Config, pool: &db::Pool) -> Result<()> {
             "lag": live_head.map(|h| h.saturating_sub(state.synced_num)),
             "backfill_block": state.backfill_num,
             "backfill_complete": state.backfill_complete(),
+            "sync_rate": state.sync_rate(),
+            "backfill_eta_secs": state.backfill_eta_secs(),
         });
         chains.push(chain_status);
     }
@@ -155,5 +165,22 @@ fn format_number(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn format_eta(secs: f64) -> String {
+    if secs <= 0.0 || secs.is_nan() || secs.is_infinite() {
+        return "unknown".to_string();
+    }
+
+    let secs = secs as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
     }
 }

@@ -12,8 +12,7 @@ async fn seed_benchmark_data() -> Result<()> {
         .with_env_filter("ak47=info,seed=info")
         .init();
 
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string());
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let txs: u64 = std::env::var("SEED_TXS")
         .ok()

@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_USER: ak47
       POSTGRES_PASSWORD: ak47
-      POSTGRES_DB: ak47_test
+      POSTGRES_DB: ak47
     ports:
       - "5433:5432"
     volumes:

@@ -122,12 +122,13 @@ impl SyncEngine {
                 write_future.await?;
             }
 
-            // Update sync state (preserve backfill_num)
+            // Update sync state (preserve backfill_num and started_at)
             let new_state = SyncState {
                 chain_id: self.chain_id,
                 head_num: remote_head,
                 synced_num: current_to,
                 backfill_num: state.backfill_num,
+                started_at: state.started_at,
             };
             save_sync_state(&self.pool, &new_state).await?;
 
@@ -390,6 +391,7 @@ impl SyncEngine {
             head_num: num,
             synced_num: num,
             backfill_num: state.backfill_num,
+            started_at: state.started_at,
         };
         save_sync_state(&self.pool, &new_state).await?;
 

@@ -21,7 +21,9 @@ backfill = true
 batch_size = 100
 
 # Add more chains:
-# [[chains]]
-# name = "presto"
-# chain_id = 4217
-# rpc_url = "https://rpc.presto.tempo.xyz"
+[[chains]]
+name = "mainnet"
+chain_id = 4217
+rpc_url = "https://eng:aphex-twin-jeff-mills@rpc.tempo.xyz"
+backfill = true
+batch_size = 100

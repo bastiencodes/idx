@@ -13,6 +13,10 @@ pub struct SyncStatus {
     pub head_num: i64,
     pub synced_num: i64,
     pub lag: i64,
+    pub backfill_num: Option<i64>,
+    pub backfill_remaining: i64,
+    pub sync_rate: Option<f64>,
+    pub eta_secs: Option<f64>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -21,17 +25,47 @@ pub async fn get_status(pool: &Pool) -> Result<Option<SyncStatus>> {
 
     let row = conn
         .query_opt(
-            "SELECT chain_id, head_num, synced_num, updated_at FROM sync_state WHERE id = 1",
+            "SELECT chain_id, head_num, synced_num, backfill_num, started_at, updated_at FROM sync_state WHERE id = 1",
             &[],
         )
         .await?;
 
-    Ok(row.map(|row| SyncStatus {
-        chain_id: row.get(0),
-        head_num: row.get(1),
-        synced_num: row.get(2),
-        lag: row.get::<_, i64>(1) - row.get::<_, i64>(2),
-        updated_at: row.get(3),
+    Ok(row.map(|row| {
+        let synced_num: i64 = row.get(2);
+        let backfill_num: Option<i64> = row.get(3);
+        let started_at: Option<DateTime<Utc>> = row.get(4);
+
+        let backfill_remaining = match backfill_num {
+            None => synced_num.saturating_sub(1),
+            Some(0) => 0,
+            Some(n) => n,
+        };
+
+        let sync_rate = started_at.and_then(|started| {
+            let elapsed = Utc::now().signed_duration_since(started);
+            let secs = elapsed.num_seconds() as f64;
+            let total_indexed = match backfill_num {
+                Some(n) => synced_num - n + 1,
+                None => 1,
+            };
+            if secs > 0.0 { Some(total_indexed as f64 / secs) } else { None }
+        });
+
+        let eta_secs = sync_rate.and_then(|rate| {
+            if rate > 0.0 { Some(backfill_remaining as f64 / rate) } else { None }
+        });
+
+        SyncStatus {
+            chain_id: row.get(0),
+            head_num: row.get(1),
+            synced_num,
+            lag: row.get::<_, i64>(1) - synced_num,
+            backfill_num,
+            backfill_remaining,
+            sync_rate,
+            eta_secs,
+            updated_at: row.get(5),
+        }
     }))
 }
 
