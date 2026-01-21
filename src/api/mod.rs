@@ -73,16 +73,6 @@ async fn handle_health() -> &'static str {
 struct StatusResponse {
     ok: bool,
     chains: Vec<SyncStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    duckdb: Option<DuckDbStatus>,
-}
-
-#[derive(Serialize)]
-struct DuckDbStatus {
-    enabled: bool,
-    latest_block: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lag_blocks: Option<i64>,
 }
 
 async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
@@ -94,25 +84,20 @@ async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusRespo
         }
     }
 
-    // Get DuckDB status from the default chain if enabled
-    let duckdb = if let Some(duckdb_pool) = state.get_duckdb_pool(None) {
-        let duck_status = crate::sync::get_sync_status(duckdb_pool).await.ok();
-        let pg_latest = all_chains.first().map(|c| c.synced_num).unwrap_or(0);
-        let duck_latest = duck_status.as_ref().map(|s| s.latest_block).unwrap_or(0);
-
-        Some(DuckDbStatus {
-            enabled: true,
-            latest_block: duck_latest,
-            lag_blocks: Some(pg_latest - duck_latest),
-        })
-    } else {
-        None
-    };
+    // Populate DuckDB status for each chain
+    for chain in &mut all_chains {
+        let chain_id = chain.chain_id as u64;
+        if let Some(duckdb_pool) = state.duckdb_pools.get(&chain_id) {
+            if let Ok(duck_status) = crate::sync::get_sync_status(duckdb_pool).await {
+                chain.duckdb_synced_num = Some(duck_status.latest_block);
+                chain.duckdb_lag = Some(chain.synced_num - duck_status.latest_block);
+            }
+        }
+    }
 
     Ok(Json(StatusResponse {
         ok: true,
         chains: all_chains,
-        duckdb,
     }))
 }
 

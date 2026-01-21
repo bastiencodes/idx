@@ -162,17 +162,19 @@ curl "/query?sql=SELECT...&engine=duckdb"
 
 ### Status Endpoint
 
-The `/status` endpoint shows sync status for both engines:
+The `/status` endpoint shows sync status for both engines per chain:
 
 ```json
 {
   "ok": true,
-  "chains": [...],
-  "duckdb": {
-    "enabled": true,
-    "latest_block": 999950,
-    "lag_blocks": 50
-  }
+  "chains": [{
+    "chain_id": 4217,
+    "synced_num": 1000000,
+    "head_num": 1000000,
+    "lag": 0,
+    "duckdb_synced_num": 999950,
+    "duckdb_lag": 50
+  }]
 }
 ```
 
@@ -396,7 +398,7 @@ curl "http://localhost:8080/query?sql=SELECT * FROM blocks ORDER BY num DESC LIM
 ```bash
 curl http://localhost:8080/status
 
-# Response includes DuckDB sync status
+# Response includes DuckDB sync status per chain
 {
   "ok": true,
   "chains": [{
@@ -404,13 +406,10 @@ curl http://localhost:8080/status
     "synced_num": 567890,
     "head_num": 567890,
     "backfill_num": 123456,
-    "lag": 0
-  }],
-  "duckdb": {
-    "enabled": true,
-    "latest_block": 567840,
-    "lag_blocks": 50
-  }
+    "lag": 0,
+    "duckdb_synced_num": 567840,
+    "duckdb_lag": 50
+  }]
 }
 ```
 
