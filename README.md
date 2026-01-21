@@ -60,7 +60,7 @@ cat > config.toml << EOF
 name = "mainnet"
 chain_id = 4217
 rpc_url = "https://rpc.tempo.xyz"
-database_url = "postgres://user:pass@localhost:5432/ak47"
+pg_url = "postgres://user:pass@localhost:5432/ak47"
 EOF
 
 # Start indexing
@@ -212,7 +212,9 @@ cargo build --release
 
 ## Configuration
 
-ak47 uses a TOML config file. Each `[[chains]]` block defines a chain to index:
+ak47 uses a TOML config file. Each `[[chains]]` block defines a chain to index
+
+### Example
 
 ```toml
 # config.toml
@@ -230,7 +232,7 @@ port = 9090
 name = "mainnet"
 chain_id = 4217
 rpc_url = "https://rpc.tempo.xyz"
-database_url = "postgres://user:pass@localhost:5432/ak47_mainnet"
+pg_url = "postgres://user:pass@localhost:5432/ak47_mainnet"
 duckdb_path = "/data/mainnet.duckdb"  # Optional: enables OLAP queries
 backfill = true
 batch_size = 100
@@ -239,13 +241,15 @@ batch_size = 100
 name = "moderato"
 chain_id = 42431
 rpc_url = "https://rpc.moderato.tempo.xyz"
-database_url = "postgres://user:pass@localhost:5432/ak47_moderato"
+pg_url = "postgres://user:pass@localhost:5432/ak47_moderato"
 duckdb_path = "/data/moderato.duckdb"
 ```
 
-### Configuration Reference
+### Reference
 
-#### `[http]` — HTTP API Server
+#### `[http]`
+
+HTTP server configuration
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -253,26 +257,30 @@ duckdb_path = "/data/moderato.duckdb"
 | `port` | u16 | `8080` | HTTP server port |
 | `bind` | string | `"0.0.0.0"` | Bind address |
 
-#### `[prometheus]` — Metrics Server
+#### `[prometheus]`
+
+Prometheus metrics server configuration
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable Prometheus metrics endpoint |
 | `port` | u16 | `9090` | Metrics server port |
 
-#### `[[chains]]` — Chain Configuration (one per chain)
+#### `[[chains]]`
+
+Chain configuration
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | ✓ | - | Display name for logging |
 | `chain_id` | u64 | ✓ | - | Chain ID |
 | `rpc_url` | string | ✓ | - | JSON-RPC endpoint URL |
-| `database_url` | string | ✓ | - | PostgreSQL connection string |
+| `pg_url` | string | ✓ | - | PostgreSQL connection string |
 | `duckdb_path` | string | - | - | Path to DuckDB file (enables OLAP). Omit to disable DuckDB for this chain |
 | `backfill` | bool | - | `true` | Enable backfill to genesis |
 | `batch_size` | u64 | - | `100` | Blocks per RPC batch request |
 
-## CLI Reference
+## CLI
 
 ```
 Usage: ak47 <COMMAND>

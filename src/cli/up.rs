@@ -59,8 +59,8 @@ pub async fn run(args: Args) -> Result<()> {
     let mut default_chain_id = 0u64;
 
     for chain in &config.chains {
-        info!(chain = %chain.name, db = %chain.database_url, "Connecting to database...");
-        let pool = db::create_pool(&chain.database_url).await?;
+        info!(chain = %chain.name, db = %chain.pg_url, "Connecting to database...");
+        let pool = db::create_pool(&chain.pg_url).await?;
 
         info!(chain = %chain.name, "Running migrations...");
         db::run_migrations(&pool).await?;

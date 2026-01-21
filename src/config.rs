@@ -89,7 +89,7 @@ pub struct ChainConfig {
     pub rpc_url: String,
 
     /// Database connection URL for this chain
-    pub database_url: String,
+    pub pg_url: String,
 
     /// DuckDB path for this chain (optional, enables OLAP queries)
     pub duckdb_path: Option<String>,

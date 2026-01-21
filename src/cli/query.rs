@@ -53,7 +53,7 @@ pub async fn run(args: Args) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("No chains configured"))?
     };
 
-    let pool = db::create_pool(&chain.database_url).await?;
+    let pool = db::create_pool(&chain.pg_url).await?;
 
     let options = QueryOptions {
         timeout_ms: args.timeout,

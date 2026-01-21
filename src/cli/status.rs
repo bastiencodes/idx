@@ -60,7 +60,7 @@ async fn print_status(config: &Config) -> Result<()> {
         println!("│");
 
         // Connect to this chain's database
-        let pool = match db::create_pool(&chain.database_url).await {
+        let pool = match db::create_pool(&chain.pg_url).await {
             Ok(p) => p,
             Err(e) => {
                 println!("│  Status: Database connection failed");
@@ -146,7 +146,7 @@ async fn print_json_status(config: &Config) -> Result<()> {
         let rpc = RpcClient::new(&chain.rpc_url);
         let live_head = rpc.latest_block_number().await.ok();
 
-        let state = if let Ok(pool) = db::create_pool(&chain.database_url).await {
+        let state = if let Ok(pool) = db::create_pool(&chain.pg_url).await {
             load_sync_state(&pool, chain.chain_id).await.ok().flatten()
         } else {
             None
@@ -156,7 +156,7 @@ async fn print_json_status(config: &Config) -> Result<()> {
             "name": chain.name,
             "chain_id": chain.chain_id,
             "rpc_url": chain.rpc_url,
-            "database_url": chain.database_url,
+            "pg_url": chain.pg_url,
             "head": live_head,
             "synced": state.as_ref().map(|s| s.synced_num),
             "lag": state.as_ref().and_then(|s| live_head.map(|h| h.saturating_sub(s.synced_num))),
