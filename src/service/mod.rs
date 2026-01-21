@@ -210,7 +210,7 @@ async fn execute_query_postgres(
             metrics::record_query_duration(start.elapsed());
             rows
         }
-        Ok(Err(e)) => return Err(anyhow!("Query error: {e:?}")),
+        Ok(Err(e)) => return Err(anyhow!("Query error: {}", sanitize_db_error(&e.to_string()))),
         Err(_) => return Err(anyhow!("Query timeout")),
     };
 
@@ -296,7 +296,7 @@ async fn execute_query_duckdb(
                 engine: Some("duckdb".to_string()),
             })
         }
-        Ok(Ok(Err(e))) => Err(anyhow!("DuckDB query error: {e:#}")),
+        Ok(Ok(Err(e))) => Err(anyhow!("DuckDB query error: {}", sanitize_db_error(&e.to_string()))),
         Ok(Err(e)) => Err(anyhow!("DuckDB task error: {e}")),
         Err(_) => Err(anyhow!("Query timeout")),
     }
@@ -355,5 +355,35 @@ pub fn format_column_string(row: &tokio_postgres::Row, idx: usize) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         other => other.to_string(),
     }
+}
+
+/// Sanitize database error messages to prevent information leakage.
+///
+/// Removes file paths, internal schema details, and other sensitive info
+/// while preserving useful error context for debugging.
+fn sanitize_db_error(error: &str) -> String {
+    // Truncate very long errors
+    let error = if error.len() > 500 {
+        format!("{}...", &error[..500])
+    } else {
+        error.to_string()
+    };
+
+    // Remove file paths (Unix and Windows)
+    let error = regex_lite::Regex::new(r"(/[a-zA-Z0-9_./-]+|[A-Z]:\\[a-zA-Z0-9_.\\ -]+)")
+        .map(|re| re.replace_all(&error, "[path]").to_string())
+        .unwrap_or(error);
+
+    // Remove potential connection strings
+    let error = regex_lite::Regex::new(r"postgres://[^\s]+")
+        .map(|re| re.replace_all(&error, "[connection]").to_string())
+        .unwrap_or(error);
+
+    // Remove IP addresses
+    let error = regex_lite::Regex::new(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?")
+        .map(|re| re.replace_all(&error, "[address]").to_string())
+        .unwrap_or(error);
+
+    error
 }
 
