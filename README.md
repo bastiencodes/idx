@@ -24,7 +24,7 @@
 ## Features
 
 - **Hybrid Query Routing** — Automatic routing to DuckDB for analytics, PostgreSQL for point lookups
-- **Dual Storage** — TimescaleDB for OLTP + DuckDB columnar for OLAP
+- **Dual Storage** — PostgreSQL for OLTP + DuckDB columnar for OLAP
 - **Continuous Aggregates** — Materialized views that auto-refresh for instant analytics
 - **Event Decoding** — Query decoded events by ABI signature (no pre-registration)
 - **HTTP API + CLI** — Query data via REST, SQL, or command line
@@ -48,7 +48,7 @@
 
 ### Requirements
 
-- [TimescaleDB](https://docs.timescale.com/self-hosted/latest/install/) (Postgres with time-series extensions)
+- [PostgreSQL](https://www.postgresql.org/download/)
 
 ### Install
 
