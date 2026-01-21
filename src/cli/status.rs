@@ -86,23 +86,46 @@ async fn print_status(config: &Config) -> Result<()> {
             let gaps = detect_all_gaps(&pool, state.tip_num).await.unwrap_or_default();
             let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
             
+            // Get actual block count from database for accurate stats
+            let actual_block_count: u64 = {
+                let conn = pool.get().await.ok();
+                if let Some(conn) = conn {
+                    conn.query_one("SELECT COUNT(*) FROM blocks", &[])
+                        .await
+                        .ok()
+                        .map(|row| row.get::<_, i64>(0) as u64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            };
+            
             println!("│  Gap Sync");
             if gaps.is_empty() {
                 println!("│  └─ Status:   ✓ Fully synced (0 → {})", format_number(state.tip_num));
             } else {
-                let pct = if state.tip_num > 0 {
-                    let synced = state.tip_num.saturating_sub(total_gap_blocks);
-                    (synced as f64 / state.tip_num as f64 * 100.0) as u64
+                let total_needed = state.tip_num + 1; // blocks 0 to tip_num
+                let pct = if total_needed > 0 {
+                    (actual_block_count as f64 / total_needed as f64 * 100.0) as u64
                 } else {
                     0
                 };
                 println!("│  ├─ Status:   In progress");
                 println!("│  ├─ Gaps:     {} ({} blocks)", gaps.len(), format_number(total_gap_blocks));
                 println!("│  ├─ Progress: {pct}%");
-                if let Some(rate) = state.sync_rate() {
-                    let eta_secs = if rate > 0.0 { total_gap_blocks as f64 / rate } else { 0.0 };
-                    println!("│  ├─ Rate:     {:.0} blk/s", rate);
-                    println!("│  └─ ETA:      {}", format_eta(eta_secs));
+                
+                // Calculate rate from actual synced blocks and elapsed time
+                if let Some(started) = state.started_at {
+                    let elapsed = chrono::Utc::now().signed_duration_since(started);
+                    let secs = elapsed.num_seconds() as f64;
+                    if secs > 10.0 && actual_block_count > 0 {
+                        let rate = actual_block_count as f64 / secs;
+                        let eta_secs = if rate > 0.0 { total_gap_blocks as f64 / rate } else { 0.0 };
+                        println!("│  ├─ Rate:     {:.0} blk/s", rate);
+                        println!("│  └─ ETA:      {}", format_eta(eta_secs));
+                    } else {
+                        println!("│  └─ ETA:      calculating...");
+                    }
                 } else {
                     println!("│  └─ ETA:      calculating...");
                 }
@@ -121,12 +144,11 @@ async fn print_status(config: &Config) -> Result<()> {
                 }
             }
 
-            // Coverage
-            let (low, high) = state.indexed_range();
+            // Coverage - use actual block count
             println!("│");
             println!("│  Coverage");
-            println!("│  ├─ Range:    {} → {}", format_number(low), format_number(high));
-            println!("│  └─ Total:    {} blocks", format_number(state.total_indexed()));
+            println!("│  ├─ Range:    0 → {}", format_number(state.tip_num));
+            println!("│  └─ Total:    {} blocks synced", format_number(actual_block_count));
 
             // Visual diagram
             println!("│");
