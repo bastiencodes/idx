@@ -91,11 +91,10 @@ impl Replicator {
         match batch {
             ReplicaBatch::Blocks(blocks) => {
                 let count = blocks.len();
-                for block in blocks {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO blocks (num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        duckdb::params![
+                if count > 0 {
+                    let mut appender = conn.appender("blocks")?;
+                    for block in blocks {
+                        appender.append_row(duckdb::params![
                             block.num,
                             format!("0x{}", hex::encode(&block.hash)),
                             format!("0x{}", hex::encode(&block.parent_hash)),
@@ -105,19 +104,19 @@ impl Replicator {
                             block.gas_used,
                             format!("0x{}", hex::encode(&block.miner)),
                             block.extra_data.as_ref().map(|d| format!("0x{}", hex::encode(d))),
-                        ],
-                    )?;
+                        ])?;
+                    }
+                    appender.flush()?;
                 }
                 Self::update_watermark(&conn)?;
                 tracing::debug!(count, "Replicated blocks to DuckDB");
             }
             ReplicaBatch::Txs(txs) => {
                 let count = txs.len();
-                for tx in txs {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO txs (block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce, fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        duckdb::params![
+                if count > 0 {
+                    let mut appender = conn.appender("txs")?;
+                    for tx in txs {
+                        appender.append_row(duckdb::params![
                             tx.block_num,
                             tx.block_timestamp.to_rfc3339(),
                             tx.idx,
@@ -125,11 +124,11 @@ impl Replicator {
                             tx.tx_type,
                             format!("0x{}", hex::encode(&tx.from)),
                             tx.to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
-                            tx.value,
+                            tx.value.clone(),
                             format!("0x{}", hex::encode(&tx.input)),
                             tx.gas_limit,
-                            tx.max_fee_per_gas,
-                            tx.max_priority_fee_per_gas,
+                            tx.max_fee_per_gas.clone(),
+                            tx.max_priority_fee_per_gas.clone(),
                             tx.gas_used,
                             format!("0x{}", hex::encode(&tx.nonce_key)),
                             tx.nonce,
@@ -140,40 +139,45 @@ impl Replicator {
                             tx.valid_before,
                             tx.valid_after,
                             tx.signature_type,
-                        ],
-                    )?;
+                        ])?;
+                    }
+                    appender.flush()?;
                 }
                 Self::update_watermark(&conn)?;
                 tracing::debug!(count, "Replicated txs to DuckDB");
             }
             ReplicaBatch::Logs(logs) => {
                 let count = logs.len();
-                for log in logs {
-                    let topics_str = format!(
-                        "[{}]",
-                        log.topics
-                            .iter()
-                            .map(|t| format!("'{}'", format!("0x{}", hex::encode(t))))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    conn.execute(
-                        &format!(
-                            "INSERT OR REPLACE INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, {}, ?)",
-                            topics_str
-                        ),
-                        duckdb::params![
-                            log.block_num,
-                            log.block_timestamp.to_rfc3339(),
-                            log.log_idx,
-                            log.tx_idx,
-                            format!("0x{}", hex::encode(&log.tx_hash)),
-                            format!("0x{}", hex::encode(&log.address)),
-                            log.selector.as_ref().map(|s| format!("0x{}", hex::encode(s))),
-                            format!("0x{}", hex::encode(&log.data)),
-                        ],
-                    )?;
+                if count > 0 {
+                    conn.execute("BEGIN TRANSACTION", [])?;
+                    for log in &logs {
+                        let topics_str = format!(
+                            "[{}]",
+                            log.topics
+                                .iter()
+                                .map(|t| format!("'{}'", format!("0x{}", hex::encode(t))))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        conn.execute(
+                            &format!(
+                                "INSERT INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, {}, ?)",
+                                topics_str
+                            ),
+                            duckdb::params![
+                                log.block_num,
+                                log.block_timestamp.to_rfc3339(),
+                                log.log_idx,
+                                log.tx_idx,
+                                format!("0x{}", hex::encode(&log.tx_hash)),
+                                format!("0x{}", hex::encode(&log.address)),
+                                log.selector.as_ref().map(|s| format!("0x{}", hex::encode(s))),
+                                format!("0x{}", hex::encode(&log.data)),
+                            ],
+                        )?;
+                    }
+                    conn.execute("COMMIT", [])?;
                 }
                 Self::update_watermark(&conn)?;
                 tracing::debug!(count, "Replicated logs to DuckDB");
@@ -243,23 +247,22 @@ pub async fn backfill_from_postgres(
             )
             .await?;
 
-        // Insert into DuckDB
-        let duck_conn = duckdb.conn().await;
-        for row in &rows {
-            let num: i64 = row.get(0);
-            let hash: Vec<u8> = row.get(1);
-            let parent_hash: Vec<u8> = row.get(2);
-            let timestamp: chrono::DateTime<chrono::Utc> = row.get(3);
-            let timestamp_ms: i64 = row.get(4);
-            let gas_limit: i64 = row.get(5);
-            let gas_used: i64 = row.get(6);
-            let miner: Vec<u8> = row.get(7);
-            let extra_data: Option<Vec<u8>> = row.get(8);
+        // Insert into DuckDB using Appender for bulk inserts
+        if !rows.is_empty() {
+            let duck_conn = duckdb.conn().await;
+            let mut appender = duck_conn.appender("blocks")?;
+            for row in &rows {
+                let num: i64 = row.get(0);
+                let hash: Vec<u8> = row.get(1);
+                let parent_hash: Vec<u8> = row.get(2);
+                let timestamp: chrono::DateTime<chrono::Utc> = row.get(3);
+                let timestamp_ms: i64 = row.get(4);
+                let gas_limit: i64 = row.get(5);
+                let gas_used: i64 = row.get(6);
+                let miner: Vec<u8> = row.get(7);
+                let extra_data: Option<Vec<u8>> = row.get(8);
 
-            duck_conn.execute(
-                "INSERT OR REPLACE INTO blocks (num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                duckdb::params![
+                appender.append_row(duckdb::params![
                     num,
                     format!("0x{}", hex::encode(&hash)),
                     format!("0x{}", hex::encode(&parent_hash)),
@@ -269,8 +272,9 @@ pub async fn backfill_from_postgres(
                     gas_used,
                     format!("0x{}", hex::encode(&miner)),
                     extra_data.as_ref().map(|d| format!("0x{}", hex::encode(d))),
-                ],
-            )?;
+                ])?;
+            }
+            appender.flush()?;
         }
 
         synced += rows.len() as u64;
