@@ -100,61 +100,39 @@ async fn print_status(config: &Config) -> Result<()> {
                 }
             };
             
-            println!("│  Gap Sync");
+            println!("│  Backfill");
             if gaps.is_empty() {
-                println!("│  └─ Status:   ✓ Fully synced (0 → {})", format_number(state.tip_num));
+                println!("│  └─ Status:   ✓ Complete (1 → {})", format_number(state.tip_num));
             } else {
-                let total_needed = state.tip_num + 1; // blocks 0 to tip_num
+                let total_needed = state.tip_num; // blocks 1 to tip_num
                 let pct = if total_needed > 0 {
                     (actual_block_count as f64 / total_needed as f64 * 100.0) as u64
                 } else {
                     0
                 };
-                println!("│  ├─ Status:   In progress");
-                println!("│  ├─ Gaps:     {} ({} blocks)", gaps.len(), format_number(total_gap_blocks));
-                println!("│  ├─ Progress: {pct}%");
                 
                 // Calculate rate from actual synced blocks and elapsed time
-                if let Some(started) = state.started_at {
+                let (rate_str, eta_str) = if let Some(started) = state.started_at {
                     let elapsed = chrono::Utc::now().signed_duration_since(started);
                     let secs = elapsed.num_seconds() as f64;
                     if secs > 10.0 && actual_block_count > 0 {
                         let rate = actual_block_count as f64 / secs;
                         let eta_secs = if rate > 0.0 { total_gap_blocks as f64 / rate } else { 0.0 };
-                        println!("│  ├─ Rate:     {:.0} blk/s", rate);
-                        println!("│  └─ ETA:      {}", format_eta(eta_secs));
+                        (format!("{:.0} blk/s", rate), format_eta(eta_secs))
                     } else {
-                        println!("│  └─ ETA:      calculating...");
+                        ("--".to_string(), "calculating...".to_string())
                     }
                 } else {
-                    println!("│  └─ ETA:      calculating...");
-                }
-                println!("│");
+                    ("--".to_string(), "calculating...".to_string())
+                };
                 
-                // Show top 5 gaps (already sorted by end desc - most recent first)
-                let display_gaps: Vec<_> = gaps.iter().take(5).collect();
-                println!("│  Next Gaps (most recent first)");
-                for (i, (start, end)) in display_gaps.iter().enumerate() {
-                    let size = end - start + 1;
-                    let prefix = if i == display_gaps.len() - 1 && gaps.len() <= 5 { "└" } else { "├" };
-                    println!("│  │  {prefix}─ {} → {} ({} blocks)", format_number(*start), format_number(*end), format_number(size));
-                }
-                if gaps.len() > 5 {
-                    println!("│  │  └─ ... and {} more gaps", gaps.len() - 5);
-                }
+                println!("│  ├─ Synced:   {} / {} ({pct}%)", format_number(actual_block_count), format_number(total_needed));
+                println!("│  ├─ Remaining: {} blocks in {} gap(s)", format_number(total_gap_blocks), gaps.len());
+                println!("│  ├─ Rate:     {rate_str}");
+                println!("│  └─ ETA:      {eta_str}");
             }
 
-            // Coverage - use actual block count
-            println!("│");
-            println!("│  Coverage");
-            println!("│  ├─ Range:    0 → {}", format_number(state.tip_num));
-            println!("│  └─ Total:    {} blocks synced", format_number(actual_block_count));
 
-            // Visual diagram
-            println!("│");
-            for line in render_sync_diagram(head, state.synced_num, state.tip_num, state.backfill_num, &gaps) {
-                println!("{}", line);
-            }
         } else {
             println!("│  Status: Not syncing");
             if let Some(head) = live_head {
@@ -214,13 +192,16 @@ async fn print_json_status(config: &Config) -> Result<()> {
 }
 
 fn format_number(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
+    // Format with thousand separators for readability
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
     }
+    result.chars().rev().collect()
 }
 
 fn format_eta(secs: f64) -> String {
@@ -240,111 +221,4 @@ fn format_eta(secs: f64) -> String {
     }
 }
 
-/// Renders a visual ASCII diagram of the sync state showing gaps
-/// 
-/// Example output:
-/// ```text
-/// │  0          500K         1M          1.5M         2M
-/// │  ├───────────┼────────────┼────────────┼────────────┤
-/// │  [██████████████████░░░░░░░░░░░█████████████████████]
-/// │              ↑            ↑                        ↑
-/// │           synced       gap-fill                  head
-/// ```
-fn render_sync_diagram(
-    head: u64,
-    synced_num: u64,
-    tip_num: u64,
-    backfill_num: Option<u64>,
-    gaps: &[(u64, u64)],
-) -> Vec<String> {
-    const WIDTH: usize = 50;
-    let mut lines = Vec::new();
-    
-    if head == 0 {
-        return lines;
-    }
 
-    // Build the bar showing synced vs gap vs realtime
-    let mut bar = vec![' '; WIDTH];
-    
-    // Helper to convert block number to bar position
-    let to_pos = |block: u64| -> usize {
-        ((block as f64 / head as f64) * (WIDTH - 1) as f64).round() as usize
-    };
-
-    // Fill backfill region (from 0 or backfill_num to synced_num)
-    let backfill_start = backfill_num.unwrap_or(0);
-    if synced_num > 0 {
-        let start_pos = to_pos(backfill_start);
-        let end_pos = to_pos(synced_num);
-        for i in start_pos..=end_pos.min(WIDTH - 1) {
-            bar[i] = '█';
-        }
-    }
-
-    // Mark backfill pending region (0 to backfill_num) as pending
-    if let Some(bf) = backfill_num {
-        if bf > 0 {
-            let end_pos = to_pos(bf);
-            for i in 0..end_pos.min(WIDTH) {
-                bar[i] = '░';
-            }
-        }
-    }
-
-    // Mark gaps
-    for (gap_start, gap_end) in gaps {
-        let start_pos = to_pos(*gap_start);
-        let end_pos = to_pos(*gap_end);
-        for i in start_pos..=end_pos.min(WIDTH - 1) {
-            bar[i] = '░';
-        }
-    }
-
-    // Fill realtime region (tip to head)
-    if tip_num > synced_num {
-        let start_pos = to_pos(synced_num + 1);
-        let end_pos = to_pos(tip_num);
-        for i in start_pos..=end_pos.min(WIDTH - 1) {
-            bar[i] = '█';
-        }
-    }
-
-    // Mark gap between synced and tip (if any)
-    if tip_num > synced_num + 1 {
-        let start_pos = to_pos(synced_num + 1);
-        let end_pos = to_pos(tip_num.saturating_sub(1));
-        for i in start_pos..=end_pos.min(WIDTH - 1) {
-            if bar[i] == '█' {
-                bar[i] = '░';
-            }
-        }
-    }
-
-    // Scale line
-    let scale_points = [0, head / 4, head / 2, 3 * head / 4, head];
-    let mut scale_line = String::new();
-    for (i, &block) in scale_points.iter().enumerate() {
-        let label = format_number(block);
-        if i == 0 {
-            scale_line.push_str(&label);
-        } else {
-            let target_pos = (i * WIDTH) / 4;
-            let current_len = scale_line.chars().count();
-            if target_pos > current_len {
-                scale_line.push_str(&" ".repeat(target_pos - current_len));
-            }
-            scale_line.push_str(&label);
-        }
-    }
-    lines.push(format!("│  {}", scale_line));
-
-    // Bar line
-    let bar_str: String = bar.into_iter().collect();
-    lines.push(format!("│  [{}]", bar_str));
-
-    // Legend
-    lines.push("│  █ synced  ░ pending/gap".to_string());
-
-    lines
-}
