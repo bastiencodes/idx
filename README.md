@@ -1,7 +1,7 @@
 <h1 align="center">ak47</h1>
 
 <p align="center">
-  <strong>High-throughput Tempo indexer in Rust</strong>
+  <strong>Indexer for Tempo</strong>
 </p>
 
 <p align="center">
