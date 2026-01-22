@@ -1150,7 +1150,7 @@ async fn test_event_signature_selector() {
 }
 
 // ============================================================================
-// DuckDB CTE tests (in-memory, no devnet required)
+// DuckDB CTE tests (in-memory, no localnet required)
 // ============================================================================
 
 #[tokio::test]

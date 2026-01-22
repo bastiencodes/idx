@@ -442,14 +442,21 @@ Gap sync finds discontinuities via SQL and adds the gap from genesis to the firs
 ### Make Commands
 
 ```bash
-make bench               # Run benchmarks
-make clean               # Stop services + clean build
-make down                # Stop services
-make logs                # Tail indexer logs
-make seed                # Generate test transactions
-make seed-heavy          # Generate ~1M+ transactions
-make test                # Run tests
-make up                  # Start devnet (PostgreSQL + Tempo)
+make up                Start services (use LOCALNET=1 for localnet)
+make down              Stop all services
+make logs              Tail indexer logs
+make build             Build Docker image
+
+make test              Run tests
+make check             Run clippy lints
+
+make seed              Generate transactions (DURATION=30 TPS=100)
+make seed-heavy        Generate ~1M+ txs with max variance
+
+make bench             Run benchmarks (restores from artifact)
+make bench-gen         Generate 5M tx seed artifact (run once)
+
+make clean             Stop services and clean
 ```
 
 ## License

@@ -373,7 +373,7 @@ fn bench_extrapolate(c: &mut Criterion) {
                 Some(pool)
             }
             Err(e) => {
-                eprintln!("Postgres not available: {} (start with: docker compose -f docker/dev/docker-compose.yml up -d postgres)", e);
+                eprintln!("Postgres not available: {} (start with: docker compose -f docker/local/docker-compose.yml up -d postgres)", e);
                 None
             }
         }

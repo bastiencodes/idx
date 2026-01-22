@@ -15,7 +15,7 @@ cargo build --release # Release build
 ### Test
 ```bash
 # Start test infrastructure (PostgreSQL + Tempo node)
-docker compose -f docker/dev/docker-compose.yml up -d postgres tempo
+docker compose -f docker/local/docker-compose.yml up -d postgres tempo
 
 # Wait for services to be healthy
 docker compose -f docker-compose.test.yml ps
