@@ -22,9 +22,8 @@
 - **Hybrid Query Routing** — Automatic routing to DuckDB for analytics, PostgreSQL for point lookups
 - **Dual Storage** — PostgreSQL for OLTP + DuckDB columnar for OLAP
 - **Continuous Aggregates** — Materialized views that auto-refresh for instant analytics
-- **Event Decoding** — Query decoded events by ABI signature (no pre-registration)
+- **Event/Function Decoding** — Query decoded events or function calldata by ABI signature (no pre-registration)
 - **HTTP API + CLI** — Query data via REST, SQL, or command line
-- **Tempo-Native** — Optimized for instant finality, TIP-20 tokens, and fast block times
 
 ## Table of Contents
 
