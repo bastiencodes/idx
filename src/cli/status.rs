@@ -20,9 +20,17 @@ pub struct Args {
     /// Watch mode - continuously update status
     #[arg(long, short)]
     pub watch: bool,
+
+    /// TIDX HTTP API URL to proxy requests to (e.g., http://localhost:8080)
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    if let Some(url) = &args.url {
+        return run_via_http(url, &args).await;
+    }
+
     let config = Config::load(&args.config)?;
 
     loop {
@@ -41,6 +49,88 @@ pub async fn run(args: Args) -> Result<()> {
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    Ok(())
+}
+
+async fn run_via_http(base_url: &str, args: &Args) -> Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/status", base_url.trim_end_matches('/'));
+
+    loop {
+        if args.watch {
+            print!("\x1B[2J\x1B[1;1H");
+        }
+
+        let resp = client.get(&url).send().await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("HTTP {}: {}", status, body);
+        }
+
+        if args.json {
+            println!("{body}");
+        } else {
+            let parsed: serde_json::Value = serde_json::from_str(&body)?;
+            print_http_status(&parsed)?;
+        }
+
+        if !args.watch {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    Ok(())
+}
+
+fn print_http_status(resp: &serde_json::Value) -> Result<()> {
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║                     TIDX Indexer Status                   ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    let empty = vec![];
+    let chains = resp["chains"].as_array().unwrap_or(&empty);
+    for chain in chains {
+        let name = chain["name"].as_str().unwrap_or("unknown");
+        let chain_id = chain["chain_id"].as_i64().unwrap_or(0);
+        let head = chain["head"].as_i64();
+        let synced_num = chain["synced_num"].as_i64().unwrap_or(0);
+        let realtime_lag = chain["realtime_lag"].as_i64().unwrap_or(0);
+        let backfill_complete = chain["backfill_complete"].as_bool().unwrap_or(false);
+        let gap_blocks = chain["gap_blocks"].as_i64().unwrap_or(0);
+        let gap_count = chain["gap_count"].as_i64().unwrap_or(0);
+        let sync_rate = chain["sync_rate"].as_f64();
+
+        println!("┌─ {} (chain_id: {}) ─────────────────────", name, chain_id);
+        println!("│");
+        println!("│  Realtime Sync");
+        if let Some(h) = head {
+            println!("│  ├─ Head:      {} (live)", format_number(h as u64));
+        }
+        println!("│  ├─ Tip:       {}", format_number(synced_num as u64));
+        println!("│  └─ Lag:       {} blocks", realtime_lag);
+        println!("│");
+        println!("│  Backfill");
+        if backfill_complete {
+            println!("│  └─ Status:   ✓ Complete");
+        } else {
+            println!("│  ├─ Remaining: {} blocks in {} gap(s)", format_number(gap_blocks as u64), gap_count);
+            if let Some(rate) = sync_rate {
+                println!("│  ├─ Rate:     {:.0} blk/s", rate);
+                if rate > 0.0 {
+                    let eta_secs = gap_blocks as f64 / rate;
+                    println!("│  └─ ETA:      {}", format_eta(eta_secs));
+                }
+            }
+        }
+        println!("└───────────────────────────────────────────────────────────");
+        println!();
     }
 
     Ok(())

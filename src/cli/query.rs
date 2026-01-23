@@ -8,9 +8,9 @@ use tidx::service::{self, execute_query_with_engine, QueryOptions};
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Chain name to query (uses first chain if not specified)
+    /// Chain ID to query (uses first chain if not specified)
     #[arg(long)]
-    pub chain: Option<String>,
+    pub chain_id: Option<u64>,
 
     /// Path to config file
     #[arg(short, long, default_value = "config.toml")]
@@ -38,18 +38,26 @@ pub struct Args {
     /// Query timeout in milliseconds
     #[arg(long, default_value = "30000")]
     pub timeout: u64,
+
+    /// TIDX HTTP API URL to proxy requests to (e.g., http://localhost:8080)
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    if let Some(url) = &args.url {
+        return run_via_http(url, &args).await;
+    }
+
     let config = Config::load(&args.config)?;
 
-    // Find chain by name, or use first chain
-    let chain = if let Some(name) = &args.chain {
+    // Find chain by ID, or use first chain
+    let chain = if let Some(id) = args.chain_id {
         config
             .chains
             .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| anyhow::anyhow!("Chain '{}' not found in config", name))?
+            .find(|c| c.chain_id == id)
+            .ok_or_else(|| anyhow::anyhow!("Chain ID {} not found in config", id))?
     } else {
         config
             .chains
@@ -135,4 +143,71 @@ fn json_to_string(v: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         other => other.to_string(),
     }
+}
+
+async fn run_via_http(base_url: &str, args: &Args) -> Result<()> {
+    let chain_id = args
+        .chain_id
+        .ok_or_else(|| anyhow::anyhow!("--chain-id required when using --url"))?;
+
+    let client = reqwest::Client::new();
+    let mut url = reqwest::Url::parse(&format!("{}/query", base_url.trim_end_matches('/')))?;
+
+    url.query_pairs_mut()
+        .append_pair("sql", &args.sql)
+        .append_pair("chainId", &chain_id.to_string())
+        .append_pair("timeout_ms", &args.timeout.to_string())
+        .append_pair("limit", &args.limit.to_string());
+
+    if let Some(sig) = &args.signature {
+        url.query_pairs_mut().append_pair("signature", sig);
+    }
+    if let Some(engine) = &args.engine {
+        url.query_pairs_mut().append_pair("engine", engine);
+    }
+
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("HTTP {}: {}", status, body);
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body)?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let err = parsed["error"].as_str().unwrap_or("Unknown error");
+        anyhow::bail!("{}", err);
+    }
+
+    let result = service::QueryResult {
+        columns: parsed["columns"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        rows: parsed["rows"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|row| row.as_array().cloned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        row_count: parsed["row_count"].as_i64().unwrap_or(0) as usize,
+        engine: parsed["engine"].as_str().map(String::from),
+    };
+
+    if result.row_count == 0 {
+        println!("No results");
+        return Ok(());
+    }
+
+    match args.format.as_str() {
+        "json" => print_json(&result)?,
+        "csv" => print_csv(&result)?,
+        _ => print_table(&result)?,
+    }
+
+    Ok(())
 }
