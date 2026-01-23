@@ -29,7 +29,7 @@ services:
     restart: unless-stopped
 
   tidx:
-    image: ghcr.io/tempoxyz/tidx:latest
+    image: ghcr.io/tempoxyz/tidx:6cb137c
     command:
       - up
       - --config
