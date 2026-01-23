@@ -24,7 +24,7 @@ fn make_pools(pool: tidx::db::Pool) -> (HashMap<u64, tidx::db::Pool>, u64) {
 
 /// Create a test service that includes ConnectInfo (required by rate limit middleware).
 async fn make_test_service(
-    pools: HashMap<u64, ak47::db::Pool>,
+    pools: HashMap<u64, tidx::db::Pool>,
     chain_id: u64,
     broadcaster: Arc<Broadcaster>,
 ) -> impl Service<Request<Body>, Response = axum::response::Response, Error = std::convert::Infallible>
