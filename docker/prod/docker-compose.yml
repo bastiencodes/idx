@@ -29,6 +29,7 @@ services:
     restart: unless-stopped
 
   tidx:
+    platform: linux/amd64
     # TODO: use latest tag
     image: ghcr.io/tempoxyz/tidx:6cb137c
     command:
