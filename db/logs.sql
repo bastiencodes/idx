@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS logs (
     PRIMARY KEY (block_timestamp, block_num, log_idx)
 );
 
-CREATE INDEX IF NOT EXISTS idx_logs_block_num ON logs (block_num);
+CREATE INDEX IF NOT EXISTS idx_logs_block_num ON logs (block_num DESC);
+CREATE INDEX IF NOT EXISTS idx_logs_block_num_asc ON logs (block_num ASC);
 CREATE INDEX IF NOT EXISTS idx_logs_tx_hash ON logs (tx_hash);
 CREATE INDEX IF NOT EXISTS idx_logs_selector ON logs (selector, block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_address ON logs (address, block_timestamp DESC);

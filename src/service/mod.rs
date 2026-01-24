@@ -102,6 +102,9 @@ pub struct QueryResult {
     pub row_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
+    /// Server-side query execution time in milliseconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_time_ms: Option<f64>,
 }
 
 pub struct QueryOptions {
@@ -242,12 +245,15 @@ async fn execute_query_postgres(
         rows[0].columns().iter().map(|c| c.name().to_string()).collect()
     };
 
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
     if rows.is_empty() {
         return Ok(QueryResult {
             columns,
             rows: vec![],
             row_count: 0,
             engine: Some("postgres".to_string()),
+            query_time_ms: Some(elapsed_ms),
         });
     }
     let row_count = rows.len();
@@ -267,6 +273,7 @@ async fn execute_query_postgres(
         rows: result_rows,
         row_count,
         engine: Some("postgres".to_string()),
+        query_time_ms: Some(elapsed_ms),
     })
 }
 
@@ -301,7 +308,8 @@ async fn execute_query_duckdb(
 
     match result {
         Ok(Ok(Ok((columns, rows)))) => {
-            metrics::record_query_duration(start.elapsed());
+            let elapsed = start.elapsed();
+            metrics::record_query_duration(elapsed);
             let row_count = rows.len();
             metrics::record_query_rows(row_count as u64);
 
@@ -310,6 +318,7 @@ async fn execute_query_duckdb(
                 rows,
                 row_count,
                 engine: Some("duckdb".to_string()),
+                query_time_ms: Some(elapsed.as_secs_f64() * 1000.0),
             })
         }
         Ok(Ok(Err(e))) => Err(anyhow!("DuckDB query error: {}", sanitize_db_error(&e.to_string()))),

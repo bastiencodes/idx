@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS txs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_txs_hash ON txs (hash);
-CREATE INDEX IF NOT EXISTS idx_txs_block_num ON txs (block_num);
+CREATE INDEX IF NOT EXISTS idx_txs_block_num ON txs (block_num DESC);
+CREATE INDEX IF NOT EXISTS idx_txs_block_num_asc ON txs (block_num ASC);
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_calls ON txs USING GIN (calls);

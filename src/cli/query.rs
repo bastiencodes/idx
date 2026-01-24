@@ -196,6 +196,7 @@ async fn run_via_http(base_url: &str, args: &Args) -> Result<()> {
             .unwrap_or_default(),
         row_count: parsed["row_count"].as_i64().unwrap_or(0) as usize,
         engine: parsed["engine"].as_str().map(String::from),
+        query_time_ms: parsed["query_time_ms"].as_f64(),
     };
 
     if result.row_count == 0 {
