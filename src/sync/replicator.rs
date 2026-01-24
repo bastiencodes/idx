@@ -1116,22 +1116,24 @@ mod tests {
             miner: vec![0xde; 20],
             extra_data: None,
         };
-        let conn = duckdb.conn().await;
-        let mut appender = conn.appender("blocks").unwrap();
-        appender
-            .append_row(duckdb::params![
-                block.num,
-                format!("0x{}", hex::encode(&block.hash)),
-                format!("0x{}", hex::encode(&block.parent_hash)),
-                block.timestamp.to_rfc3339(),
-                block.timestamp_ms,
-                block.gas_limit,
-                block.gas_used,
-                format!("0x{}", hex::encode(&block.miner)),
-                block.extra_data.as_ref().map(|d| format!("0x{}", hex::encode(d))),
-            ])
-            .unwrap();
-        appender.flush().unwrap();
+        {
+            let conn = duckdb.conn().await;
+            let mut appender = conn.appender("blocks").unwrap();
+            appender
+                .append_row(duckdb::params![
+                    block.num,
+                    format!("0x{}", hex::encode(&block.hash)),
+                    format!("0x{}", hex::encode(&block.parent_hash)),
+                    block.timestamp.to_rfc3339(),
+                    block.timestamp_ms,
+                    block.gas_limit,
+                    block.gas_used,
+                    format!("0x{}", hex::encode(&block.miner)),
+                    block.extra_data.as_ref().map(|d| format!("0x{}", hex::encode(d))),
+                ])
+                .unwrap();
+            appender.flush().unwrap();
+        }
 
         let gaps = detect_all_gaps_duckdb(&duckdb, 10).await.unwrap();
         assert_eq!(gaps.len(), 1);
