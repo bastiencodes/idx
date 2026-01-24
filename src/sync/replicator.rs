@@ -210,9 +210,8 @@ impl Replicator {
             ReplicaBatch::Logs(logs) => {
                 let count = logs.len();
                 if count > 0 {
-                    conn.execute("BEGIN TRANSACTION", [])?;
-                    
                     // Batch logs into chunks for fewer INSERT statements
+                    // Each chunk is its own transaction to avoid stuck aborted state
                     for chunk in logs.chunks(100) {
                         let values: Vec<String> = chunk
                             .iter()
@@ -245,16 +244,14 @@ impl Replicator {
                             })
                             .collect();
                         
-                        conn.execute(
-                            &format!(
-                                "INSERT INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) VALUES {}",
-                                values.join(", ")
-                            ),
-                            [],
-                        )?;
+                        let sql = format!(
+                            "INSERT INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) VALUES {}",
+                            values.join(", ")
+                        );
+                        if let Err(e) = conn.execute(&sql, []) {
+                            tracing::warn!(error = %e, "Failed to insert log batch, skipping");
+                        }
                     }
-                    
-                    conn.execute("COMMIT", [])?;
                 }
                 Self::update_watermark(&conn)?;
                 tracing::debug!(count, "Replicated logs to DuckDB");
