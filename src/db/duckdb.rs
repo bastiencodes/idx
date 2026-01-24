@@ -141,6 +141,23 @@ fn run_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (block_num, log_idx)
         );
 
+        -- Receipts table
+        CREATE TABLE IF NOT EXISTS receipts (
+            block_num               BIGINT NOT NULL,
+            block_timestamp         TIMESTAMPTZ NOT NULL,
+            tx_idx                  INTEGER NOT NULL,
+            tx_hash                 VARCHAR NOT NULL,
+            "from"                  VARCHAR NOT NULL,
+            "to"                    VARCHAR,
+            contract_address        VARCHAR,
+            gas_used                BIGINT NOT NULL,
+            cumulative_gas_used     BIGINT NOT NULL,
+            effective_gas_price     VARCHAR,
+            status                  SMALLINT,
+            fee_payer               VARCHAR,
+            PRIMARY KEY (block_num, tx_idx)
+        );
+
         -- Sync state tracking
         CREATE TABLE IF NOT EXISTS duckdb_sync_state (
             id              INTEGER PRIMARY KEY DEFAULT 1,

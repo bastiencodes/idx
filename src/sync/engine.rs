@@ -182,6 +182,7 @@ impl SyncEngine {
             let block_rows_clone = block_rows.clone();
             let all_txs_clone = all_txs.clone();
             let all_logs_clone = all_logs.clone();
+            let all_receipts_clone = all_receipts.clone();
             let write_future = async {
                 write_blocks(&self.pool, &block_rows).await?;
                 write_txs(&self.pool, &all_txs).await?;
@@ -192,6 +193,7 @@ impl SyncEngine {
                     rep.send_blocks(block_rows_clone).await.ok();
                     rep.send_txs(all_txs_clone).await.ok();
                     rep.send_logs(all_logs_clone).await.ok();
+                    rep.send_receipts(all_receipts_clone).await.ok();
                 }
 
                 Ok::<_, anyhow::Error>(())

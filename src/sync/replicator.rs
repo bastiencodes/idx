@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::db::{DuckDbPool, Pool};
-use crate::types::{BlockRow, LogRow, TxRow};
+use crate::types::{BlockRow, LogRow, ReceiptRow, TxRow};
 
 /// Batch of rows to replicate to DuckDB.
 #[derive(Debug)]
@@ -12,6 +12,7 @@ pub enum ReplicaBatch {
     Blocks(Vec<BlockRow>),
     Txs(Vec<TxRow>),
     Logs(Vec<LogRow>),
+    Receipts(Vec<ReceiptRow>),
 }
 
 /// DuckDB replicator that syncs data from PostgreSQL.
@@ -59,6 +60,17 @@ impl ReplicatorHandle {
         }
         self.tx
             .send(ReplicaBatch::Logs(logs))
+            .await
+            .map_err(|_| anyhow::anyhow!("Replicator channel closed"))
+    }
+
+    /// Sends a batch of receipts to be replicated.
+    pub async fn send_receipts(&self, receipts: Vec<ReceiptRow>) -> Result<()> {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        self.tx
+            .send(ReplicaBatch::Receipts(receipts))
             .await
             .map_err(|_| anyhow::anyhow!("Replicator channel closed"))
     }
@@ -182,6 +194,31 @@ impl Replicator {
                 Self::update_watermark(&conn)?;
                 tracing::debug!(count, "Replicated logs to DuckDB");
             }
+            ReplicaBatch::Receipts(receipts) => {
+                let count = receipts.len();
+                if count > 0 {
+                    let mut appender = conn.appender("receipts")?;
+                    for receipt in receipts {
+                        appender.append_row(duckdb::params![
+                            receipt.block_num,
+                            receipt.block_timestamp.to_rfc3339(),
+                            receipt.tx_idx,
+                            format!("0x{}", hex::encode(&receipt.tx_hash)),
+                            format!("0x{}", hex::encode(&receipt.from)),
+                            receipt.to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
+                            receipt.contract_address.as_ref().map(|a| format!("0x{}", hex::encode(a))),
+                            receipt.gas_used,
+                            receipt.cumulative_gas_used,
+                            receipt.effective_gas_price.clone(),
+                            receipt.status,
+                            receipt.fee_payer.as_ref().map(|p| format!("0x{}", hex::encode(p))),
+                        ])?;
+                    }
+                    appender.flush()?;
+                }
+                Self::update_watermark(&conn)?;
+                tracing::debug!(count, "Replicated receipts to DuckDB");
+            }
         }
 
         Ok(())
@@ -199,7 +236,7 @@ impl Replicator {
     }
 }
 
-/// Backfills DuckDB from PostgreSQL for blocks that haven't been synced yet.
+/// Backfills DuckDB from PostgreSQL for blocks, txs, logs, and receipts.
 pub async fn backfill_from_postgres(
     pg_pool: &Pool,
     duckdb: &Arc<DuckDbPool>,
@@ -238,8 +275,8 @@ pub async fn backfill_from_postgres(
     while current <= pg_latest {
         let end = (current + batch_size - 1).min(pg_latest);
 
-        // Fetch blocks from PostgreSQL
-        let rows = pg_conn
+        // Backfill blocks
+        let block_rows = pg_conn
             .query(
                 "SELECT num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data 
                  FROM blocks WHERE num >= $1 AND num <= $2 ORDER BY num",
@@ -247,11 +284,10 @@ pub async fn backfill_from_postgres(
             )
             .await?;
 
-        // Insert into DuckDB using Appender for bulk inserts
-        if !rows.is_empty() {
+        if !block_rows.is_empty() {
             let duck_conn = duckdb.conn().await;
             let mut appender = duck_conn.appender("blocks")?;
-            for row in &rows {
+            for row in &block_rows {
                 let num: i64 = row.get(0);
                 let hash: Vec<u8> = row.get(1);
                 let parent_hash: Vec<u8> = row.get(2);
@@ -277,7 +313,173 @@ pub async fn backfill_from_postgres(
             appender.flush()?;
         }
 
-        synced += rows.len() as u64;
+        // Backfill txs
+        let tx_rows = pg_conn
+            .query(
+                "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input,
+                        gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce,
+                        fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type
+                 FROM txs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, idx",
+                &[&current, &end],
+            )
+            .await?;
+
+        if !tx_rows.is_empty() {
+            let duck_conn = duckdb.conn().await;
+            let mut appender = duck_conn.appender("txs")?;
+            for row in &tx_rows {
+                let block_num: i64 = row.get(0);
+                let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
+                let idx: i32 = row.get(2);
+                let hash: Vec<u8> = row.get(3);
+                let tx_type: i16 = row.get(4);
+                let from: Vec<u8> = row.get(5);
+                let to: Option<Vec<u8>> = row.get(6);
+                let value: String = row.get(7);
+                let input: Vec<u8> = row.get(8);
+                let gas_limit: i64 = row.get(9);
+                let max_fee_per_gas: String = row.get(10);
+                let max_priority_fee_per_gas: String = row.get(11);
+                let gas_used: Option<i64> = row.get(12);
+                let nonce_key: Vec<u8> = row.get(13);
+                let nonce: i64 = row.get(14);
+                let fee_token: Option<Vec<u8>> = row.get(15);
+                let fee_payer: Option<Vec<u8>> = row.get(16);
+                let calls: Option<serde_json::Value> = row.get(17);
+                let call_count: i16 = row.get(18);
+                let valid_before: Option<i64> = row.get(19);
+                let valid_after: Option<i64> = row.get(20);
+                let signature_type: Option<i16> = row.get(21);
+
+                appender.append_row(duckdb::params![
+                    block_num,
+                    block_timestamp.to_rfc3339(),
+                    idx,
+                    format!("0x{}", hex::encode(&hash)),
+                    tx_type,
+                    format!("0x{}", hex::encode(&from)),
+                    to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
+                    value,
+                    format!("0x{}", hex::encode(&input)),
+                    gas_limit,
+                    max_fee_per_gas,
+                    max_priority_fee_per_gas,
+                    gas_used,
+                    format!("0x{}", hex::encode(&nonce_key)),
+                    nonce,
+                    fee_token.as_ref().map(|t| format!("0x{}", hex::encode(t))),
+                    fee_payer.as_ref().map(|p| format!("0x{}", hex::encode(p))),
+                    calls.as_ref().map(|c| c.to_string()),
+                    call_count,
+                    valid_before,
+                    valid_after,
+                    signature_type,
+                ])?;
+            }
+            appender.flush()?;
+        }
+
+        // Backfill logs
+        let log_rows = pg_conn
+            .query(
+                "SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data
+                 FROM logs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, log_idx",
+                &[&current, &end],
+            )
+            .await?;
+
+        if !log_rows.is_empty() {
+            let duck_conn = duckdb.conn().await;
+            duck_conn.execute("BEGIN TRANSACTION", [])?;
+            for row in &log_rows {
+                let block_num: i64 = row.get(0);
+                let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
+                let log_idx: i32 = row.get(2);
+                let tx_idx: i32 = row.get(3);
+                let tx_hash: Vec<u8> = row.get(4);
+                let address: Vec<u8> = row.get(5);
+                let selector: Option<Vec<u8>> = row.get(6);
+                let topics: Option<Vec<Vec<u8>>> = row.get(7);
+                let data: Vec<u8> = row.get(8);
+
+                let topics_str = format!(
+                    "[{}]",
+                    topics
+                        .as_ref()
+                        .map(|t| t.iter()
+                            .map(|topic| format!("'0x{}'", hex::encode(topic)))
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                );
+
+                duck_conn.execute(
+                    &format!(
+                        "INSERT INTO logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, {}, ?)",
+                        topics_str
+                    ),
+                    duckdb::params![
+                        block_num,
+                        block_timestamp.to_rfc3339(),
+                        log_idx,
+                        tx_idx,
+                        format!("0x{}", hex::encode(&tx_hash)),
+                        format!("0x{}", hex::encode(&address)),
+                        selector.as_ref().map(|s| format!("0x{}", hex::encode(s))),
+                        format!("0x{}", hex::encode(&data)),
+                    ],
+                )?;
+            }
+            duck_conn.execute("COMMIT", [])?;
+        }
+
+        // Backfill receipts
+        let receipt_rows = pg_conn
+            .query(
+                "SELECT block_num, block_timestamp, tx_idx, tx_hash, \"from\", \"to\", contract_address,
+                        gas_used, cumulative_gas_used, effective_gas_price, status, fee_payer
+                 FROM receipts WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, tx_idx",
+                &[&current, &end],
+            )
+            .await?;
+
+        if !receipt_rows.is_empty() {
+            let duck_conn = duckdb.conn().await;
+            let mut appender = duck_conn.appender("receipts")?;
+            for row in &receipt_rows {
+                let block_num: i64 = row.get(0);
+                let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
+                let tx_idx: i32 = row.get(2);
+                let tx_hash: Vec<u8> = row.get(3);
+                let from: Vec<u8> = row.get(4);
+                let to: Option<Vec<u8>> = row.get(5);
+                let contract_address: Option<Vec<u8>> = row.get(6);
+                let gas_used: i64 = row.get(7);
+                let cumulative_gas_used: i64 = row.get(8);
+                let effective_gas_price: Option<String> = row.get(9);
+                let status: Option<i16> = row.get(10);
+                let fee_payer: Option<Vec<u8>> = row.get(11);
+
+                appender.append_row(duckdb::params![
+                    block_num,
+                    block_timestamp.to_rfc3339(),
+                    tx_idx,
+                    format!("0x{}", hex::encode(&tx_hash)),
+                    format!("0x{}", hex::encode(&from)),
+                    to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
+                    contract_address.as_ref().map(|a| format!("0x{}", hex::encode(a))),
+                    gas_used,
+                    cumulative_gas_used,
+                    effective_gas_price,
+                    status,
+                    fee_payer.as_ref().map(|p| format!("0x{}", hex::encode(p))),
+                ])?;
+            }
+            appender.flush()?;
+        }
+
+        synced += block_rows.len() as u64;
         current = end + 1;
 
         if synced % 10000 == 0 {
@@ -352,6 +554,120 @@ mod tests {
         assert_eq!(result, 1);
 
         // Drop handle to close channel and stop replicator
+        drop(handle);
+        let _ = replicator_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_replicator_txs() {
+        let duckdb = Arc::new(DuckDbPool::in_memory().unwrap());
+        let (replicator, handle) = Replicator::new(duckdb.clone(), 100);
+        let replicator_task = tokio::spawn(replicator.run());
+
+        let tx = TxRow {
+            block_num: 1,
+            block_timestamp: Utc::now(),
+            idx: 0,
+            hash: vec![0xab; 32],
+            tx_type: 2,
+            from: vec![0xde; 20],
+            to: Some(vec![0xbe; 20]),
+            value: "1000000000000000000".to_string(),
+            input: vec![],
+            gas_limit: 21000,
+            max_fee_per_gas: "1000000000".to_string(),
+            max_priority_fee_per_gas: "1000000".to_string(),
+            gas_used: Some(21000),
+            nonce_key: vec![0x00; 32],
+            nonce: 0,
+            fee_token: None,
+            fee_payer: None,
+            calls: None,
+            call_count: 1,
+            valid_before: None,
+            valid_after: None,
+            signature_type: Some(0),
+        };
+
+        handle.send_txs(vec![tx]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let conn = duckdb.conn().await;
+        let mut stmt = conn
+            .prepare("SELECT block_num, idx FROM txs WHERE block_num = 1")
+            .unwrap();
+        let result: (i64, i32) = stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(result, (1, 0));
+
+        drop(handle);
+        let _ = replicator_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_replicator_logs() {
+        let duckdb = Arc::new(DuckDbPool::in_memory().unwrap());
+        let (replicator, handle) = Replicator::new(duckdb.clone(), 100);
+        let replicator_task = tokio::spawn(replicator.run());
+
+        let log = LogRow {
+            block_num: 1,
+            block_timestamp: Utc::now(),
+            log_idx: 0,
+            tx_idx: 0,
+            tx_hash: vec![0xab; 32],
+            address: vec![0xca; 20],
+            selector: Some(vec![0xdd, 0xf2, 0x52, 0xad]),
+            topics: vec![vec![0xdd; 32], vec![0xee; 32]],
+            data: vec![0x00; 32],
+        };
+
+        handle.send_logs(vec![log]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let conn = duckdb.conn().await;
+        let mut stmt = conn
+            .prepare("SELECT block_num, log_idx FROM logs WHERE block_num = 1")
+            .unwrap();
+        let result: (i64, i32) = stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(result, (1, 0));
+
+        drop(handle);
+        let _ = replicator_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_replicator_receipts() {
+        let duckdb = Arc::new(DuckDbPool::in_memory().unwrap());
+        let (replicator, handle) = Replicator::new(duckdb.clone(), 100);
+        let replicator_task = tokio::spawn(replicator.run());
+
+        let receipt = ReceiptRow {
+            block_num: 1,
+            block_timestamp: Utc::now(),
+            tx_idx: 0,
+            tx_hash: vec![0xab; 32],
+            from: vec![0xde; 20],
+            to: Some(vec![0xbe; 20]),
+            contract_address: None,
+            gas_used: 21000,
+            cumulative_gas_used: 21000,
+            effective_gas_price: Some("1000000000".to_string()),
+            status: Some(1),
+            fee_payer: None,
+        };
+
+        handle.send_receipts(vec![receipt]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let conn = duckdb.conn().await;
+        let mut stmt = conn
+            .prepare("SELECT block_num, tx_idx, gas_used FROM receipts WHERE block_num = 1")
+            .unwrap();
+        let result: (i64, i32, i64) = stmt
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        assert_eq!(result, (1, 0, 21000));
+
         drop(handle);
         let _ = replicator_task.await;
     }
