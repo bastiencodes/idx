@@ -257,34 +257,48 @@ async fn print_status(config: &Config) -> Result<()> {
                         if let Ok((duck_min, duck_max)) = duckdb.block_range().await {
                             let duck_min = duck_min.unwrap_or(0);
                             let duck_max = duck_max.unwrap_or(0);
-                            let tip_lag = (state.tip_num as i64) - duck_max;
-                            let backfill_remaining = (duck_min - pg_min).max(0);
                             
-                            // Get DuckDB block count for rate estimation
-                            let duck_count: i64 = duckdb.query("SELECT COUNT(*) FROM blocks").await
-                                .ok()
-                                .and_then(|(_, rows)| rows.first().and_then(|r| r.first().and_then(|v| v.as_i64())))
-                                .unwrap_or(0);
-                            
-                            println!("│  ├─ Range:    {} → {}", format_number(duck_min as u64), format_number(duck_max as u64));
-                            println!("│  ├─ Synced:   {} blocks", format_number(duck_count as u64));
-                            println!("│  ├─ Tip lag:  {} blocks", tip_lag);
-                            
-                            if backfill_remaining > 0 {
-                                // Estimate rate from PG backfill rate (DuckDB follows PG)
-                                let eta_str = if let Some(rate) = state.sync_rate {
+                            if duck_max == 0 {
+                                println!("│  └─ Status:   Empty");
+                            } else {
+                                let tip_lag = (state.tip_num as i64) - duck_max;
+                                let backfill_remaining = (duck_min - pg_min).max(0);
+                                
+                                // Get DuckDB block count
+                                let duck_count: i64 = duckdb.query("SELECT COUNT(*) FROM blocks").await
+                                    .ok()
+                                    .and_then(|(_, rows)| rows.first().and_then(|r| r.first().and_then(|v| v.as_i64())))
+                                    .unwrap_or(0);
+                                
+                                // Total needed = PG range that DuckDB should have
+                                let total_needed = (state.tip_num as i64) - pg_min + 1;
+                                let pct = if total_needed > 0 {
+                                    (duck_count as f64 / total_needed as f64 * 100.0) as u64
+                                } else {
+                                    0
+                                };
+                                
+                                let total_remaining = backfill_remaining + tip_lag;
+                                
+                                // Estimate rate from PG sync rate
+                                let (rate_str, eta_str) = if let Some(rate) = state.sync_rate {
                                     if rate > 0.0 {
-                                        format_eta(backfill_remaining as f64 / rate)
+                                        (format!("{:.0} blk/s", rate), format_eta(total_remaining as f64 / rate))
                                     } else {
-                                        "calculating...".to_string()
+                                        ("--".to_string(), "calculating...".to_string())
                                     }
                                 } else {
-                                    "calculating...".to_string()
+                                    ("--".to_string(), "calculating...".to_string())
                                 };
-                                println!("│  ├─ Backfill: {} blocks remaining", format_number(backfill_remaining as u64));
-                                println!("│  └─ ETA:      {}", eta_str);
-                            } else {
-                                println!("│  └─ Backfill: ✓ Complete");
+                                
+                                if total_remaining == 0 {
+                                    println!("│  └─ Status:   ✓ Complete ({} → {})", format_number(duck_min as u64), format_number(duck_max as u64));
+                                } else {
+                                    println!("│  ├─ Synced:   {} / {} ({}%)", format_number(duck_count as u64), format_number(total_needed as u64), pct);
+                                    println!("│  ├─ Remaining: {} blocks (tip: {}, backfill: {})", format_number(total_remaining as u64), tip_lag, format_number(backfill_remaining as u64));
+                                    println!("│  ├─ Rate:     {}", rate_str);
+                                    println!("│  └─ ETA:      {}", eta_str);
+                                }
                             }
                         } else {
                             println!("│  └─ Status:   Empty");
