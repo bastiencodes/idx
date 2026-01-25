@@ -115,6 +115,13 @@ impl RpcClient {
             anyhow::bail!("RPC request failed with status {}: {}", status, body.chars().take(200).collect::<String>());
         }
 
+        // Check if the RPC returned a single error object instead of an array
+        if let Ok(single_error) = serde_json::from_str::<RpcResponse<serde_json::Value>>(&body) {
+            if let Some(err) = single_error.error {
+                anyhow::bail!("RPC batch error: {}", err.message);
+            }
+        }
+
         let responses: Vec<RpcResponse<Block>> = serde_json::from_str(&body)
             .map_err(|e| {
                 tracing::error!(
@@ -180,6 +187,14 @@ impl RpcClient {
                 "RPC receipts request failed"
             );
             anyhow::bail!("RPC receipts request failed with status {}: {}", status, body.chars().take(200).collect::<String>());
+        }
+
+        // Check if the RPC returned a single error object instead of an array
+        // This happens when the entire batch request fails (e.g., response too large)
+        if let Ok(single_error) = serde_json::from_str::<RpcResponse<serde_json::Value>>(&body) {
+            if let Some(err) = single_error.error {
+                anyhow::bail!("RPC batch error: {}", err.message);
+            }
         }
 
         let responses: Vec<RpcResponse<Vec<Receipt>>> = serde_json::from_str(&body)
