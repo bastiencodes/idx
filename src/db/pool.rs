@@ -61,6 +61,14 @@ impl ThrottledPool {
         })
     }
 
+    /// Wrap an existing pool (useful for tests).
+    pub fn from_pool(pool: Pool) -> Self {
+        Self {
+            pool,
+            backfill_semaphore: Arc::new(Semaphore::new(6)),
+        }
+    }
+
     /// Get a connection for realtime or API (no throttling).
     pub async fn get(&self) -> Result<deadpool_postgres::Object> {
         Ok(self.pool.get().await?)

@@ -1,4 +1,4 @@
-use tidx::db::{create_pool, run_migrations, Pool};
+use tidx::db::{create_pool, run_migrations, Pool, ThrottledPool};
 use tidx::sync::engine::SyncEngine;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 
@@ -64,7 +64,7 @@ impl TestDb {
         // Wait for some blocks
         tempo.wait_for_block(50).await.ok();
 
-        let engine = SyncEngine::new(self.pool.clone(), &tempo.rpc_url)
+        let engine = SyncEngine::new(ThrottledPool::from_pool(self.pool.clone()), &tempo.rpc_url)
             .await
             .expect("Failed to create sync engine");
 
