@@ -91,6 +91,9 @@ impl Replicator {
         let mut gap_fill_interval = tokio::time::interval(Duration::from_secs(30));
         gap_fill_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let mut checkpoint_interval = tokio::time::interval(Duration::from_secs(60));
+        checkpoint_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 batch = self.rx.recv() => {
@@ -109,6 +112,14 @@ impl Replicator {
                 _ = gap_fill_interval.tick() => {
                     if let Err(e) = self.run_gap_fill().await {
                         tracing::error!(error = %e, "DuckDB gap-fill failed");
+                    }
+                }
+                _ = checkpoint_interval.tick() => {
+                    let conn = self.duckdb.conn().await;
+                    if let Err(e) = conn.execute("CHECKPOINT", []) {
+                        tracing::warn!(error = %e, "DuckDB checkpoint failed");
+                    } else {
+                        tracing::debug!("DuckDB checkpoint completed");
                     }
                 }
             }
