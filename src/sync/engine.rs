@@ -670,6 +670,23 @@ async fn tick_gapfill_parallel(
 ) -> Result<()> {
     let state = load_sync_state(pool, chain_id).await?.unwrap_or_default();
 
+    // Adaptive throttling: pause backfill when realtime lag is high
+    // This ensures realtime sync always has priority
+    let remote_head = rpc.latest_block_number().await.unwrap_or(state.tip_num);
+    let realtime_lag = remote_head.saturating_sub(state.tip_num);
+    
+    const LAG_THRESHOLD: u64 = 10; // Pause backfill if lag exceeds this
+    if realtime_lag > LAG_THRESHOLD {
+        debug!(
+            chain_id = chain_id,
+            realtime_lag = realtime_lag,
+            threshold = LAG_THRESHOLD,
+            "Gap-fill: pausing to let realtime sync catch up"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        return Ok(());
+    }
+
     // Detect ALL gaps including from genesis, sorted by end DESC (most recent first)
     let gaps = detect_all_gaps(pool, state.tip_num).await?;
 

@@ -12,7 +12,7 @@ services:
     command:
       - postgres
       - -c
-      - max_wal_size=4GB
+      - max_wal_size=16GB
       - -c
       - checkpoint_timeout=30min
       - -c
@@ -47,6 +47,7 @@ services:
         condition: service_healthy
     environment:
       RUST_LOG: ${RUST_LOG:-tidx=info}
+      RUST_LOG_FORMAT: ${RUST_LOG_FORMAT:-pretty}
     restart: unless-stopped
 
   # Optional: Prometheus for metrics collection
@@ -56,11 +57,13 @@ services:
       - "9091:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
     restart: unless-stopped
     profiles:
       - monitoring

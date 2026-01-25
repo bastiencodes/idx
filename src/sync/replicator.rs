@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::db::{DuckDbPool, Pool};
+use crate::metrics;
 use crate::types::{BlockRow, LogRow, ReceiptRow, TxRow};
 
 /// Batch of rows to replicate to DuckDB.
@@ -25,6 +26,7 @@ pub struct Replicator {
     duckdb: Arc<DuckDbPool>,
     pg_pool: Pool,
     rx: mpsc::Receiver<ReplicaBatch>,
+    chain_id: u64,
 }
 
 /// Handle for sending batches to the replicator.
@@ -78,15 +80,15 @@ impl ReplicatorHandle {
 
 impl Replicator {
     /// Creates a new replicator with a channel for receiving batches.
-    pub fn new(duckdb: Arc<DuckDbPool>, pg_pool: Pool, buffer_size: usize) -> (Self, ReplicatorHandle) {
+    pub fn new(duckdb: Arc<DuckDbPool>, pg_pool: Pool, buffer_size: usize, chain_id: u64) -> (Self, ReplicatorHandle) {
         let (tx, rx) = mpsc::channel(buffer_size);
-        (Self { duckdb, pg_pool, rx }, ReplicatorHandle { tx })
+        (Self { duckdb, pg_pool, rx, chain_id }, ReplicatorHandle { tx })
     }
 
     /// Runs the replicator, processing batches as they arrive.
     /// Also runs periodic gap-fill every 30s to catch up on dropped batches.
     pub async fn run(mut self) -> Result<()> {
-        tracing::info!("DuckDB replicator started");
+        tracing::info!(chain_id = self.chain_id, "DuckDB replicator started");
 
         let mut gap_fill_interval = tokio::time::interval(Duration::from_secs(30));
         gap_fill_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -94,38 +96,84 @@ impl Replicator {
         let mut checkpoint_interval = tokio::time::interval(Duration::from_secs(60));
         checkpoint_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let mut metrics_interval = tokio::time::interval(Duration::from_secs(10));
+        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 batch = self.rx.recv() => {
                     match batch {
                         Some(b) => {
                             if let Err(e) = self.process_batch(b).await {
-                                tracing::error!(error = %e, "Failed to replicate batch to DuckDB");
+                                tracing::error!(chain_id = self.chain_id, error = %e, "Failed to replicate batch to DuckDB");
+                                metrics::increment_duckdb_errors("batch_process");
                             }
                         }
                         None => {
-                            tracing::info!("DuckDB replicator channel closed");
+                            tracing::info!(chain_id = self.chain_id, "DuckDB replicator channel closed");
                             break;
                         }
                     }
                 }
                 _ = gap_fill_interval.tick() => {
                     if let Err(e) = self.run_gap_fill().await {
-                        tracing::error!(error = %e, "DuckDB gap-fill failed");
+                        tracing::error!(chain_id = self.chain_id, error = %e, "DuckDB gap-fill failed");
+                        metrics::increment_duckdb_errors("gap_fill");
                     }
                 }
                 _ = checkpoint_interval.tick() => {
                     let conn = self.duckdb.conn().await;
                     if let Err(e) = conn.execute("CHECKPOINT", []) {
-                        tracing::warn!(error = %e, "DuckDB checkpoint failed");
+                        tracing::warn!(chain_id = self.chain_id, error = %e, "DuckDB checkpoint failed");
+                        metrics::increment_duckdb_errors("checkpoint");
                     } else {
-                        tracing::debug!("DuckDB checkpoint completed");
+                        tracing::debug!(chain_id = self.chain_id, "DuckDB checkpoint completed");
+                    }
+                }
+                _ = metrics_interval.tick() => {
+                    if let Err(e) = self.emit_metrics().await {
+                        tracing::debug!(chain_id = self.chain_id, error = %e, "Failed to emit DuckDB metrics");
                     }
                 }
             }
         }
 
-        tracing::info!("DuckDB replicator stopped");
+        tracing::info!(chain_id = self.chain_id, "DuckDB replicator stopped");
+        Ok(())
+    }
+
+    /// Emit metrics for DuckDB sync status.
+    async fn emit_metrics(&self) -> Result<()> {
+        let pg_latest = {
+            let conn = self.pg_pool.get().await?;
+            let row = conn.query_one("SELECT COALESCE(MAX(num), 0) FROM blocks", &[]).await?;
+            row.get::<_, i64>(0)
+        };
+
+        let duck_latest = self.duckdb.latest_block().await?.unwrap_or(0);
+        let lag = pg_latest - duck_latest;
+
+        metrics::set_duckdb_synced_block(self.chain_id, duck_latest);
+        metrics::set_duckdb_lag(self.chain_id, lag);
+
+        let gaps = detect_all_gaps_duckdb(&self.duckdb, pg_latest).await?;
+        let gap_blocks: i64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+
+        metrics::set_duckdb_gap_count(self.chain_id, gaps.len());
+        metrics::set_duckdb_gap_blocks(self.chain_id, gap_blocks);
+
+        if lag > 100 || !gaps.is_empty() {
+            tracing::info!(
+                chain_id = self.chain_id,
+                duck_latest,
+                pg_latest,
+                lag,
+                gap_count = gaps.len(),
+                gap_blocks,
+                "DuckDB sync status"
+            );
+        }
+
         Ok(())
     }
 
@@ -158,6 +206,7 @@ impl Replicator {
     }
 
     async fn process_batch(&self, batch: ReplicaBatch) -> Result<()> {
+        let start = Instant::now();
         let conn = self.duckdb.conn().await;
 
         // Helper to reset connection state after errors
@@ -184,8 +233,9 @@ impl Replicator {
                             block.extra_data.as_ref().map(|d| format!("'0x{}'", hex::encode(d))).unwrap_or_else(|| "NULL".to_string()),
                         );
                         if let Err(e) = conn.execute(&sql, []) {
-                            tracing::warn!(error = %e, block_num = block.num, "Failed to insert block, skipping");
+                            tracing::warn!(chain_id = self.chain_id, error = %e, block_num = block.num, "Failed to insert block, skipping");
                             rollback_if_needed(&conn);
+                            metrics::increment_duckdb_errors("block_insert");
                         }
                     }
                 }
@@ -193,7 +243,8 @@ impl Replicator {
                     rollback_if_needed(&conn);
                     return Err(e);
                 }
-                tracing::debug!(count, "Replicated blocks to DuckDB");
+                metrics::record_duckdb_batch("blocks", count, start.elapsed(), true);
+                tracing::debug!(chain_id = self.chain_id, count, "Replicated blocks to DuckDB");
             }
             ReplicaBatch::Txs(txs) => {
                 let count = txs.len();
