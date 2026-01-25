@@ -199,6 +199,12 @@ impl Replicator {
                 Ok(synced) => {
                     total_synced += synced;
 
+                    // Checkpoint after each batch to keep WAL small and improve read performance
+                    if synced > 0 {
+                        let conn = duckdb.conn().await;
+                        let _ = conn.execute("CHECKPOINT", []);
+                    }
+
                     // Log progress every 30 seconds during active sync
                     if synced > 0 && last_progress_log.elapsed() > Duration::from_secs(30) {
                         let elapsed = start_time.elapsed();
