@@ -94,14 +94,38 @@ impl RpcClient {
             })
             .collect();
 
-        let responses: Vec<RpcResponse<Block>> = self
+        let response = self
             .client
             .post(&self.url)
             .json(&batch)
             .send()
-            .await?
-            .json()
             .await?;
+
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            tracing::error!(
+                status = %status,
+                body_preview = %body.chars().take(500).collect::<String>(),
+                from = %range.start(),
+                to = %range.end(),
+                "RPC request failed"
+            );
+            anyhow::bail!("RPC request failed with status {}: {}", status, body.chars().take(200).collect::<String>());
+        }
+
+        let responses: Vec<RpcResponse<Block>> = serde_json::from_str(&body)
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    body_preview = %body.chars().take(500).collect::<String>(),
+                    from = %range.start(),
+                    to = %range.end(),
+                    "Failed to decode blocks response"
+                );
+                anyhow!("Failed to decode blocks response: {}", e)
+            })?;
 
         responses
             .into_iter()
@@ -137,14 +161,38 @@ impl RpcClient {
             })
             .collect();
 
-        let responses: Vec<RpcResponse<Vec<Receipt>>> = self
+        let response = self
             .client
             .post(&self.url)
             .json(&batch)
             .send()
-            .await?
-            .json()
             .await?;
+
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            tracing::error!(
+                status = %status,
+                body_preview = %body.chars().take(500).collect::<String>(),
+                from = %range.start(),
+                to = %range.end(),
+                "RPC receipts request failed"
+            );
+            anyhow::bail!("RPC receipts request failed with status {}: {}", status, body.chars().take(200).collect::<String>());
+        }
+
+        let responses: Vec<RpcResponse<Vec<Receipt>>> = serde_json::from_str(&body)
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    body_preview = %body.chars().take(500).collect::<String>(),
+                    from = %range.start(),
+                    to = %range.end(),
+                    "Failed to decode receipts response"
+                );
+                anyhow!("Failed to decode receipts response: {}", e)
+            })?;
 
         responses
             .into_iter()
