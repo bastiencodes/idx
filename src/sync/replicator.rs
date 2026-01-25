@@ -580,11 +580,11 @@ impl Replicator {
                     let tx_type: i16 = row.get(4);
                     let from: Vec<u8> = row.get(5);
                     let to: Option<Vec<u8>> = row.get(6);
-                    let value: rust_decimal::Decimal = row.get(7);
+                    let value: String = row.get(7);
                     let input: Vec<u8> = row.get(8);
                     let gas_limit: i64 = row.get(9);
-                    let max_fee: rust_decimal::Decimal = row.get(10);
-                    let max_priority: rust_decimal::Decimal = row.get(11);
+                    let max_fee: String = row.get(10);
+                    let max_priority: String = row.get(11);
                     let gas_used: Option<i64> = row.get(12);
                     let nonce_key: Vec<u8> = row.get(13);
                     let nonce: i64 = row.get(14);
@@ -690,7 +690,7 @@ impl Replicator {
                     let contract_address: Option<Vec<u8>> = row.get(6);
                     let gas_used: i64 = row.get(7);
                     let cumulative_gas_used: i64 = row.get(8);
-                    let effective_gas_price: Option<rust_decimal::Decimal> = row.get(9);
+                    let effective_gas_price: Option<String> = row.get(9);
                     let status: Option<i16> = row.get(10);
                     let fee_payer: Option<Vec<u8>> = row.get(11);
 
@@ -705,7 +705,7 @@ impl Replicator {
                         contract_address.as_ref().map(|c| format!("'0x{}'", hex::encode(c))).unwrap_or_else(|| "NULL".to_string()),
                         gas_used,
                         cumulative_gas_used,
-                        effective_gas_price.map(|p| format!("'{}'", p)).unwrap_or_else(|| "NULL".to_string()),
+                        effective_gas_price.as_ref().map(|p| format!("'{}'", p)).unwrap_or_else(|| "NULL".to_string()),
                         status.map(|s| s.to_string()).unwrap_or_else(|| "NULL".to_string()),
                         fee_payer.as_ref().map(|p| format!("'0x{}'", hex::encode(p))).unwrap_or_else(|| "NULL".to_string()),
                     )
@@ -1236,11 +1236,11 @@ pub async fn fill_gaps_from_postgres(
                                 let tx_type: i16 = row.get(4);
                                 let from: Vec<u8> = row.get(5);
                                 let to: Option<Vec<u8>> = row.get(6);
-                                let value: rust_decimal::Decimal = row.get(7);
+                                let value: String = row.get(7);
                                 let input: Vec<u8> = row.get(8);
                                 let gas_limit: i64 = row.get(9);
-                                let max_fee: rust_decimal::Decimal = row.get(10);
-                                let max_priority: rust_decimal::Decimal = row.get(11);
+                                let max_fee: String = row.get(10);
+                                let max_priority: String = row.get(11);
                                 let gas_used: Option<i64> = row.get(12);
                                 let nonce_key: Vec<u8> = row.get(13);
                                 let nonce: i64 = row.get(14);
@@ -1382,7 +1382,7 @@ pub async fn fill_gaps_from_postgres(
                                 let contract_address: Option<Vec<u8>> = row.get(6);
                                 let gas_used: i64 = row.get(7);
                                 let cumulative_gas_used: i64 = row.get(8);
-                                let effective_gas_price: Option<rust_decimal::Decimal> = row.get(9);
+                                let effective_gas_price: Option<String> = row.get(9);
                                 let status: Option<i16> = row.get(10);
                                 let fee_payer: Option<Vec<u8>> = row.get(11);
 
