@@ -392,21 +392,25 @@ impl Replicator {
         // Load extension (INSTALL is cached after first call, LOAD needed per connection)
         conn.execute("LOAD postgres", [])?;
         
-        // Attach Postgres database with a unique alias
-        // Note: ATTACH is connection-scoped, so we attach each time we get the connection
+        // Use chain-specific alias to avoid conflicts when multiple chains share a connection
+        let pg_alias = format!("pg_{}", chain_id);
+        
+        // Attach Postgres database with chain-specific alias
         let attach_sql = format!(
-            "ATTACH '{}' AS pg (TYPE postgres, READ_ONLY)",
-            pg_url.replace('\'', "''")
+            "ATTACH '{}' AS {} (TYPE postgres, READ_ONLY)",
+            pg_url.replace('\'', "''"),
+            pg_alias
         );
         // Detach first in case already attached from a previous call
-        let _ = conn.execute("DETACH IF EXISTS pg", []);
+        let _ = conn.execute(&format!("DETACH IF EXISTS {}", pg_alias), []);
         conn.execute(&attach_sql, [])?;
 
         // Get PG block range via attached database
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT COALESCE(MIN(num), 0) as pg_min, COALESCE(MAX(num), 0) as pg_max \
-             FROM pg.public.blocks"
-        )?;
+             FROM {}.public.blocks",
+            pg_alias
+        ))?;
         let (pg_min, pg_max): (i64, i64) = stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         if pg_max == 0 {
@@ -450,7 +454,7 @@ impl Replicator {
             while current >= gap_start {
                 let batch_start = (current - BATCH_SIZE + 1).max(gap_start);
                 
-                let synced = Self::copy_range_with_scanner(&conn, pg_url, batch_start, current)?;
+                let synced = Self::copy_range_with_scanner(&conn, &pg_alias, batch_start, current)?;
                 total_synced += synced;
                 
                 current = batch_start - 1;
@@ -478,7 +482,7 @@ impl Replicator {
 
     /// Copies a block range from Postgres to DuckDB using the attached postgres database.
     /// 
-    /// Assumes `pg` database is already attached via `ATTACH ... AS pg (TYPE postgres)`.
+    /// Assumes postgres database is already attached via `ATTACH ... AS {pg_alias} (TYPE postgres)`.
     /// 
     /// Type mappings:
     /// - BYTEA → BLOB → VARCHAR via hex() function (DuckDB native)
@@ -488,7 +492,7 @@ impl Replicator {
     /// - INT8/INT4/INT2 → BIGINT/INTEGER/SMALLINT (direct)
     fn copy_range_with_scanner(
         conn: &duckdb::Connection,
-        _pg_url: &str, // Unused - using attached database 'pg'
+        pg_alias: &str,
         start: i64,
         end: i64,
     ) -> Result<i64> {
@@ -499,7 +503,7 @@ impl Replicator {
              SELECT num, '0x' || lower(hex(hash)), '0x' || lower(hex(parent_hash)), \
                     timestamp, timestamp_ms, gas_limit, gas_used, '0x' || lower(hex(miner)), \
                     CASE WHEN extra_data IS NOT NULL THEN '0x' || lower(hex(extra_data)) ELSE NULL END \
-             FROM pg.public.blocks \
+             FROM {pg_alias}.public.blocks \
              WHERE num >= {start} AND num <= {end}"
         );
         let blocks_inserted = conn.execute(&blocks_sql, [])?;
@@ -516,7 +520,7 @@ impl Replicator {
                     CASE WHEN fee_token IS NOT NULL THEN '0x' || lower(hex(fee_token)) ELSE NULL END, \
                     CASE WHEN fee_payer IS NOT NULL THEN '0x' || lower(hex(fee_payer)) ELSE NULL END, \
                     calls, call_count, valid_before, valid_after, signature_type \
-             FROM pg.public.txs \
+             FROM {pg_alias}.public.txs \
              WHERE block_num >= {start} AND block_num <= {end}"
         );
         conn.execute(&txs_sql, [])?;
@@ -532,7 +536,7 @@ impl Replicator {
                     CASE WHEN topic2 IS NOT NULL THEN '0x' || lower(hex(topic2)) ELSE NULL END, \
                     CASE WHEN topic3 IS NOT NULL THEN '0x' || lower(hex(topic3)) ELSE NULL END, \
                     '0x' || lower(hex(data)) \
-             FROM pg.public.logs \
+             FROM {pg_alias}.public.logs \
              WHERE block_num >= {start} AND block_num <= {end}"
         );
         conn.execute(&logs_sql, [])?;
@@ -546,7 +550,7 @@ impl Replicator {
                     CASE WHEN contract_address IS NOT NULL THEN '0x' || lower(hex(contract_address)) ELSE NULL END, \
                     gas_used, cumulative_gas_used, effective_gas_price, status, \
                     CASE WHEN fee_payer IS NOT NULL THEN '0x' || lower(hex(fee_payer)) ELSE NULL END \
-             FROM pg.public.receipts \
+             FROM {pg_alias}.public.receipts \
              WHERE block_num >= {start} AND block_num <= {end}"
         );
         conn.execute(&receipts_sql, [])?;
