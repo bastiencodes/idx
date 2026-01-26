@@ -291,7 +291,7 @@ async fn print_status(config: &Config) -> Result<()> {
                                     ("--".to_string(), "calculating...".to_string())
                                 };
                                 
-                                if total_remaining == 0 {
+                                if total_remaining <= 0 {
                                     println!("│  └─ Status:   ✓ Complete ({} → {})", format_number(duck_min as u64), format_number(duck_max as u64));
                                 } else {
                                     println!("│  ├─ Synced:   {} / {} ({}%)", format_number(duck_count as u64), format_number(total_needed as u64), pct);
