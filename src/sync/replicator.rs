@@ -194,15 +194,18 @@ impl Replicator {
         let start_time = Instant::now();
         let mut last_progress_log = Instant::now();
 
+        let mut last_checkpoint = Instant::now();
+
         loop {
             match Self::gap_fill_batch(&duckdb, &pg_pool, chain_id).await {
                 Ok(synced) => {
                     total_synced += synced;
 
-                    // Checkpoint after each batch to keep WAL small and improve read performance
-                    if synced > 0 {
+                    // Checkpoint every 60s (not per-batch - checkpointing is expensive)
+                    if synced > 0 && last_checkpoint.elapsed() > Duration::from_secs(60) {
                         let conn = duckdb.conn().await;
                         let _ = conn.execute("CHECKPOINT", []);
+                        last_checkpoint = Instant::now();
                     }
 
                     // Log progress every 30 seconds during active sync
@@ -228,8 +231,8 @@ impl Replicator {
                         // Fully caught up, sleep longer
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     } else {
-                        // More to sync, brief pause to let tail task run
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // More to sync, minimal pause
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
                 Err(e) => {
@@ -299,9 +302,9 @@ impl Replicator {
         // Sort by start descending (most recent first)
         gaps.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Take up to 50k blocks per batch
-        const MAX_BLOCKS: i64 = 50_000;
-        const BATCH_SIZE: i64 = 1000;
+        // Take up to 100k blocks per gap-fill tick, in 5k block batches
+        const MAX_BLOCKS: i64 = 100_000;
+        const BATCH_SIZE: i64 = 5000;
         let mut remaining = MAX_BLOCKS;
         let mut synced = 0i64;
 
@@ -640,7 +643,7 @@ async fn copy_range_to_duckdb(
 
     // Write transactions
     if !tx_rows.is_empty() {
-        for chunk in tx_rows.chunks(100) {
+        for chunk in tx_rows.chunks(500) {
             let values: Vec<String> = chunk.iter().map(|row| {
                 let block_num: i64 = row.get(0);
                 let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
@@ -704,7 +707,7 @@ async fn copy_range_to_duckdb(
 
     // Write logs
     if !log_rows.is_empty() {
-        for chunk in log_rows.chunks(100) {
+        for chunk in log_rows.chunks(500) {
             let values: Vec<String> = chunk.iter().map(|row| {
                 let block_num: i64 = row.get(0);
                 let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
@@ -748,7 +751,7 @@ async fn copy_range_to_duckdb(
 
     // Write receipts
     if !receipt_rows.is_empty() {
-        for chunk in receipt_rows.chunks(100) {
+        for chunk in receipt_rows.chunks(500) {
             let values: Vec<String> = chunk.iter().map(|row| {
                 let block_num: i64 = row.get(0);
                 let block_timestamp: chrono::DateTime<chrono::Utc> = row.get(1);
@@ -947,7 +950,7 @@ pub async fn backfill_from_postgres(
 
         if !log_rows.is_empty() {
             let duck_conn = duckdb.conn().await;
-            for chunk in log_rows.chunks(100) {
+            for chunk in log_rows.chunks(500) {
                 let values: Vec<String> = chunk
                     .iter()
                     .map(|row| {
@@ -1219,7 +1222,7 @@ pub async fn fill_gaps_from_postgres(
 
             if !tx_rows.is_empty() {
                 // Pre-build all SQL values outside the lock
-                let tx_values: Vec<Vec<String>> = tx_rows.chunks(100)
+                let tx_values: Vec<Vec<String>> = tx_rows.chunks(500)
                     .map(|chunk| {
                         chunk.iter()
                             .map(|row| {
@@ -1301,7 +1304,7 @@ pub async fn fill_gaps_from_postgres(
 
             if !log_rows.is_empty() {
                 // Pre-build SQL values outside the lock
-                let log_values: Vec<Vec<String>> = log_rows.chunks(100)
+                let log_values: Vec<Vec<String>> = log_rows.chunks(500)
                     .map(|chunk| {
                         chunk.iter()
                             .map(|row| {
@@ -1363,7 +1366,7 @@ pub async fn fill_gaps_from_postgres(
 
             if !receipt_rows.is_empty() {
                 // Pre-build SQL values outside the lock
-                let receipt_values: Vec<Vec<String>> = receipt_rows.chunks(100)
+                let receipt_values: Vec<Vec<String>> = receipt_rows.chunks(500)
                     .map(|chunk| {
                         chunk.iter()
                             .map(|row| {
