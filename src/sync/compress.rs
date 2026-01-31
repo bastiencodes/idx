@@ -115,6 +115,30 @@ pub async fn run_compress_loop(
     Ok(())
 }
 
+/// Table types that can be exported to Parquet
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableType {
+    Blocks,
+    Txs,
+    Receipts,
+    Logs,
+}
+
+impl TableType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TableType::Blocks => "blocks",
+            TableType::Txs => "txs",
+            TableType::Receipts => "receipts",
+            TableType::Logs => "logs",
+        }
+    }
+    
+    fn all() -> &'static [TableType] {
+        &[TableType::Blocks, TableType::Txs, TableType::Receipts, TableType::Logs]
+    }
+}
+
 /// Create the parquet_ranges tracking table if it doesn't exist
 async fn create_parquet_ranges_table(pool: &Pool) -> Result<()> {
     let conn = pool.get().await?;
@@ -123,13 +147,14 @@ async fn create_parquet_ranges_table(pool: &Pool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS parquet_ranges (
             id SERIAL PRIMARY KEY,
             chain_id BIGINT NOT NULL,
+            table_type TEXT NOT NULL DEFAULT 'logs',
             start_block BIGINT NOT NULL,
             end_block BIGINT NOT NULL,
             file_path TEXT NOT NULL,
             row_count BIGINT NOT NULL DEFAULT 0,
             file_size_bytes BIGINT NOT NULL DEFAULT 0,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE (chain_id, start_block, end_block)
+            UNIQUE (chain_id, table_type, start_block, end_block)
         )
         "#,
         &[],
@@ -139,8 +164,8 @@ async fn create_parquet_ranges_table(pool: &Pool) -> Result<()> {
     // Index for efficient range lookups
     conn.execute(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_parquet_ranges_chain_blocks 
-        ON parquet_ranges (chain_id, start_block, end_block)
+        CREATE INDEX IF NOT EXISTS idx_parquet_ranges_chain_table_blocks 
+        ON parquet_ranges (chain_id, table_type, start_block, end_block)
         "#,
         &[],
     )
@@ -176,76 +201,86 @@ async fn tick_compress(
         }
     };
 
-    // Find the highest block already exported
-    let last_exported = get_last_exported_block(pool, chain_id).await?;
+    // Export each table type
+    let mut any_exported = false;
+    for table_type in TableType::all() {
+        // Find the highest block already exported for this table
+        let last_exported = get_last_exported_block(pool, chain_id, *table_type).await?;
 
-    // Find contiguous range from last_exported to tip
-    let range = find_contiguous_range(pool, chain_id, last_exported, tip_num as u64).await?;
+        // Find contiguous range from last_exported to tip
+        let range = find_contiguous_range(pool, chain_id, last_exported, tip_num as u64).await?;
 
-    let (start_block, end_block) = match range {
-        Some((s, e)) if e - s + 1 >= config.threshold_blocks => (s, e),
-        Some((s, e)) => {
-            debug!(
-                chain_id = chain_id,
-                start = s,
-                end = e,
-                blocks = e - s + 1,
-                threshold = config.threshold_blocks,
-                "Range too small for export"
-            );
-            return Ok(false);
-        }
-        None => {
-            debug!(chain_id = chain_id, "No contiguous range found for export");
-            return Ok(false);
-        }
-    };
+        let (start_block, end_block) = match range {
+            Some((s, e)) if e - s + 1 >= config.threshold_blocks => (s, e),
+            Some((s, e)) => {
+                debug!(
+                    chain_id = chain_id,
+                    table = table_type.as_str(),
+                    start = s,
+                    end = e,
+                    blocks = e - s + 1,
+                    threshold = config.threshold_blocks,
+                    "Range too small for export"
+                );
+                continue;
+            }
+            None => {
+                debug!(chain_id = chain_id, table = table_type.as_str(), "No contiguous range found for export");
+                continue;
+            }
+        };
 
-    info!(
-        chain_id = chain_id,
-        start = start_block,
-        end = end_block,
-        blocks = end_block - start_block + 1,
-        "Exporting logs to Parquet"
-    );
+        info!(
+            chain_id = chain_id,
+            table = table_type.as_str(),
+            start = start_block,
+            end = end_block,
+            blocks = end_block - start_block + 1,
+            "Exporting to Parquet"
+        );
 
-    // Export to Parquet
-    let file_path = data_dir.join(format!("logs_{}_{}.parquet", start_block, end_block));
-    let (row_count, file_size) =
-        export_logs_to_parquet(pool, start_block, end_block, &file_path, pg_url).await?;
+        // Export to Parquet
+        let file_path = data_dir.join(format!("{}_{}_{}.parquet", table_type.as_str(), start_block, end_block));
+        let (row_count, file_size) =
+            export_table_to_parquet(pool, *table_type, start_block, end_block, &file_path, pg_url).await?;
 
-    // Record the exported range
-    record_parquet_range(
-        pool,
-        chain_id,
-        start_block,
-        end_block,
-        file_path.to_string_lossy().as_ref(),
-        row_count,
-        file_size,
-    )
-    .await?;
+        // Record the exported range
+        record_parquet_range(
+            pool,
+            chain_id,
+            *table_type,
+            start_block,
+            end_block,
+            file_path.to_string_lossy().as_ref(),
+            row_count,
+            file_size,
+        )
+        .await?;
 
-    info!(
-        chain_id = chain_id,
-        start = start_block,
-        end = end_block,
-        row_count = row_count,
-        file_size_mb = file_size / 1024 / 1024,
-        path = %file_path.display(),
-        "Parquet export complete"
-    );
+        info!(
+            chain_id = chain_id,
+            table = table_type.as_str(),
+            start = start_block,
+            end = end_block,
+            row_count = row_count,
+            file_size_mb = file_size / 1024 / 1024,
+            path = %file_path.display(),
+            "Parquet export complete"
+        );
 
-    Ok(true)
+        any_exported = true;
+    }
+
+    Ok(any_exported)
 }
 
-/// Get the highest block number already exported to Parquet
-async fn get_last_exported_block(pool: &Pool, chain_id: u64) -> Result<u64> {
+/// Get the highest block number already exported to Parquet for a table type
+async fn get_last_exported_block(pool: &Pool, chain_id: u64, table_type: TableType) -> Result<u64> {
     let conn = pool.get().await?;
     let row = conn
         .query_opt(
-            "SELECT COALESCE(MAX(end_block), 0) FROM parquet_ranges WHERE chain_id = $1",
-            &[&(chain_id as i64)],
+            "SELECT COALESCE(MAX(end_block), 0) FROM parquet_ranges WHERE chain_id = $1 AND table_type = $2",
+            &[&(chain_id as i64), &table_type.as_str()],
         )
         .await?;
 
@@ -320,13 +355,43 @@ async fn find_contiguous_range(
     Ok(Some((start, end_block)))
 }
 
-/// Export logs from PostgreSQL to Parquet using DuckDB's postgres extension
+/// Get the SELECT query for a table type
+fn get_table_select_query(table_type: TableType, start_block: u64, end_block: u64) -> String {
+    match table_type {
+        TableType::Blocks => format!(
+            "SELECT num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data \
+             FROM pg.public.blocks WHERE num >= {} AND num <= {} ORDER BY num",
+            start_block, end_block
+        ),
+        TableType::Txs => format!(
+            "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input, \
+             gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce, \
+             fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type \
+             FROM pg.public.txs WHERE block_num >= {} AND block_num <= {} ORDER BY block_num, idx",
+            start_block, end_block
+        ),
+        TableType::Receipts => format!(
+            "SELECT block_num, block_timestamp, tx_idx, tx_hash, \"from\", \"to\", contract_address, \
+             gas_used, cumulative_gas_used, effective_gas_price, status, fee_payer \
+             FROM pg.public.receipts WHERE block_num >= {} AND block_num <= {} ORDER BY block_num, tx_idx",
+            start_block, end_block
+        ),
+        TableType::Logs => format!(
+            "SELECT block_num, tx_idx, log_idx, tx_hash, address, topic0, topic1, topic2, topic3, data \
+             FROM pg.public.logs WHERE block_num >= {} AND block_num <= {} ORDER BY block_num, log_idx",
+            start_block, end_block
+        ),
+    }
+}
+
+/// Export a table from PostgreSQL to Parquet using DuckDB's postgres extension
 ///
 /// Since pg_duckdb's raw_query runs in an isolated DuckDB context without direct
 /// access to PostgreSQL tables, we use DuckDB's postgres extension to ATTACH back
 /// to the PostgreSQL database and export from there.
-async fn export_logs_to_parquet(
+async fn export_table_to_parquet(
     pool: &Pool,
+    table_type: TableType,
     start_block: u64,
     end_block: u64,
     file_path: &PathBuf,
@@ -343,6 +408,9 @@ async fn export_logs_to_parquet(
     let duckdb_conn_str = convert_pg_url_to_duckdb(pg_url);
     let escaped_conn_str = duckdb_conn_str.replace('\'', "''");
 
+    // Get the SELECT query for this table type
+    let select_query = get_table_select_query(table_type, start_block, end_block);
+
     // Use DuckDB's postgres extension to connect back to PostgreSQL and export
     // This works because raw_query can use the postgres extension to access PG tables
     // Note: We use ATTACH IF NOT EXISTS because pg_duckdb may reuse DuckDB contexts
@@ -350,17 +418,14 @@ async fn export_logs_to_parquet(
         "INSTALL postgres; \
          LOAD postgres; \
          ATTACH IF NOT EXISTS '{}' AS pg (TYPE postgres, READ_ONLY); \
-         COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
-               topic0, topic1, topic2, topic3, data FROM pg.public.logs \
-               WHERE block_num >= {} AND block_num <= {} \
-               ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD);",
-        escaped_conn_str, start_block, end_block, escaped_path
+         COPY ({}) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD);",
+        escaped_conn_str, select_query, escaped_path
     );
 
     conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
         .await
         .map_err(|e| {
-            error!(error = %e, "Parquet export via postgres extension failed");
+            error!(error = %e, table = table_type.as_str(), "Parquet export via postgres extension failed");
             e
         })?;
 
@@ -433,6 +498,7 @@ fn read_parquet_row_count(file_path: &PathBuf) -> Result<u64> {
 async fn record_parquet_range(
     pool: &Pool,
     chain_id: u64,
+    table_type: TableType,
     start_block: u64,
     end_block: u64,
     file_path: &str,
@@ -442,15 +508,16 @@ async fn record_parquet_range(
     let conn = pool.get().await?;
     conn.execute(
         r#"
-        INSERT INTO parquet_ranges (chain_id, start_block, end_block, file_path, row_count, file_size_bytes)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (chain_id, start_block, end_block) DO UPDATE SET
+        INSERT INTO parquet_ranges (chain_id, table_type, start_block, end_block, file_path, row_count, file_size_bytes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (chain_id, table_type, start_block, end_block) DO UPDATE SET
             file_path = EXCLUDED.file_path,
             row_count = EXCLUDED.row_count,
             file_size_bytes = EXCLUDED.file_size_bytes
         "#,
         &[
             &(chain_id as i64),
+            &table_type.as_str(),
             &(start_block as i64),
             &(end_block as i64),
             &file_path,
