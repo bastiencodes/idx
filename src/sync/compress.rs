@@ -35,6 +35,7 @@ pub async fn run_compress_loop(
     pool: Pool,
     chain_id: u64,
     config: ParquetExportConfig,
+    pg_url: String,
     mut shutdown: broadcast::Receiver<()>,
     mut block_updates: broadcast::Receiver<BlockUpdate>,
 ) -> Result<()> {
@@ -64,7 +65,7 @@ pub async fn run_compress_loop(
 
     // Export any existing backlog immediately on startup
     loop {
-        match tick_compress(&pool, chain_id, &config, &chain_dir).await {
+        match tick_compress(&pool, chain_id, &config, &chain_dir, &pg_url).await {
             Ok(true) => {
                 tokio::task::yield_now().await;
             }
@@ -91,7 +92,7 @@ pub async fn run_compress_loop(
                     Ok(update) if update.chain_id == chain_id => {
                         // New block synced, try to export
                         loop {
-                            match tick_compress(&pool, chain_id, &config, &chain_dir).await {
+                            match tick_compress(&pool, chain_id, &config, &chain_dir, &pg_url).await {
                                 Ok(true) => {
                                     tokio::task::yield_now().await;
                                 }
@@ -155,6 +156,7 @@ async fn tick_compress(
     chain_id: u64,
     config: &ParquetExportConfig,
     data_dir: &PathBuf,
+    pg_url: &str,
 ) -> Result<bool> {
     let conn = pool.get().await?;
 
@@ -210,7 +212,7 @@ async fn tick_compress(
     // Export to Parquet
     let file_path = data_dir.join(format!("logs_{}_{}.parquet", start_block, end_block));
     let (row_count, file_size) =
-        export_logs_to_parquet(pool, start_block, end_block, &file_path).await?;
+        export_logs_to_parquet(pool, start_block, end_block, &file_path, pg_url).await?;
 
     // Record the exported range
     record_parquet_range(
@@ -318,67 +320,54 @@ async fn find_contiguous_range(
     Ok(Some((start, end_block)))
 }
 
-/// Export logs from PostgreSQL to Parquet using DuckDB's COPY (via pg_duckdb)
+/// Export logs from PostgreSQL to Parquet using DuckDB's postgres extension
 ///
-/// pg_duckdb intercepts PostgreSQL's COPY command when the format is 'parquet'
-/// and routes it through DuckDB, which can write Parquet files directly.
+/// Since pg_duckdb's raw_query runs in an isolated DuckDB context without direct
+/// access to PostgreSQL tables, we use DuckDB's postgres extension to ATTACH back
+/// to the PostgreSQL database and export from there.
 async fn export_logs_to_parquet(
     pool: &Pool,
     start_block: u64,
     end_block: u64,
     file_path: &PathBuf,
+    pg_url: &str,
 ) -> Result<(u64, u64)> {
     let conn = pool.get().await?;
     let path_str = file_path.to_string_lossy();
 
-    // Escape single quotes in path for SQL
+    // Escape single quotes in path and connection string for DuckDB SQL
     let escaped_path = path_str.replace('\'', "''");
 
-    // Use pg_duckdb's COPY TO syntax with parquet format
-    // pg_duckdb intercepts COPY commands with FORMAT 'parquet' and routes them through DuckDB
-    // The WITH (...) syntax is PostgreSQL-standard and works with pg_duckdb
-    let copy_sql = format!(
-        "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
-         topic0, topic1, topic2, topic3, data FROM logs \
-         WHERE block_num >= {} AND block_num <= {} \
-         ORDER BY block_num, log_idx) TO '{}' WITH (FORMAT 'parquet', COMPRESSION 'zstd')",
-        start_block, end_block, escaped_path
+    // Convert postgres:// URL to DuckDB's expected format
+    // postgres://user:pass@host:port/db -> host=host port=port dbname=db user=user password=pass
+    let duckdb_conn_str = convert_pg_url_to_duckdb(pg_url);
+    let escaped_conn_str = duckdb_conn_str.replace('\'', "''");
+
+    // Use DuckDB's postgres extension to connect back to PostgreSQL and export
+    // This works because raw_query can use the postgres extension to access PG tables
+    let duckdb_query = format!(
+        "INSTALL postgres; \
+         LOAD postgres; \
+         ATTACH '{}' AS pg (TYPE postgres, READ_ONLY); \
+         COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
+               topic0, topic1, topic2, topic3, data FROM pg.public.logs \
+               WHERE block_num >= {} AND block_num <= {} \
+               ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD);",
+        escaped_conn_str, start_block, end_block, escaped_path
     );
 
-    // Try the standard COPY approach first (works when pg_duckdb intercepts it)
-    match conn.execute(&copy_sql, &[]).await {
-        Ok(_) => {
-            debug!(path = %path_str, "COPY TO parquet succeeded");
-        }
-        Err(e) => {
-            // If standard COPY fails (e.g., PostgreSQL doesn't recognize parquet format),
-            // fall back to using duckdb.raw_query() with explicit table reference
-            debug!(error = %e, "Standard COPY failed, trying raw_query fallback");
-
-            // Use duckdb.raw_query() to execute DuckDB's native COPY command
-            // DuckDB inside pg_duckdb can see PostgreSQL tables when accessed this way
-            let duckdb_query = format!(
-                "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
-                 topic0, topic1, topic2, topic3, data FROM logs \
-                 WHERE block_num >= {} AND block_num <= {} \
-                 ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-                start_block, end_block, escaped_path
-            );
-
-            conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
-                .await
-                .map_err(|e2| {
-                    error!(
-                        original_error = %e,
-                        raw_query_error = %e2,
-                        "Both COPY and raw_query failed for Parquet export"
-                    );
-                    e2
-                })?;
-        }
-    }
+    conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Parquet export via postgres extension failed");
+            e
+        })?;
 
     // Get file size and row count from parquet metadata
+    // Note: file is written by postgres container, but shared via volume mount
+    // We need to wait a moment for the file to be visible
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     let file_size = std::fs::metadata(file_path)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -387,6 +376,44 @@ async fn export_logs_to_parquet(
     let row_count = read_parquet_row_count(file_path).unwrap_or(0);
 
     Ok((row_count, file_size))
+}
+
+/// Convert a PostgreSQL URL to DuckDB's libpq connection string format
+fn convert_pg_url_to_duckdb(pg_url: &str) -> String {
+    // Parse postgres://user:password@host:port/database
+    // Return: host=host port=port dbname=database user=user password=password
+    if let Some(rest) = pg_url.strip_prefix("postgres://").or_else(|| pg_url.strip_prefix("postgresql://")) {
+        let mut parts = Vec::new();
+
+        // Split user:password from host:port/database
+        if let Some((userinfo, hostpath)) = rest.split_once('@') {
+            // Parse user:password
+            if let Some((user, password)) = userinfo.split_once(':') {
+                parts.push(format!("user={}", user));
+                parts.push(format!("password={}", password));
+            } else {
+                parts.push(format!("user={}", userinfo));
+            }
+
+            // Parse host:port/database
+            if let Some((hostport, database)) = hostpath.split_once('/') {
+                if let Some((host, port)) = hostport.split_once(':') {
+                    parts.push(format!("host={}", host));
+                    parts.push(format!("port={}", port));
+                } else {
+                    parts.push(format!("host={}", hostport));
+                }
+                parts.push(format!("dbname={}", database));
+            } else {
+                parts.push(format!("host={}", hostpath));
+            }
+        }
+
+        parts.join(" ")
+    } else {
+        // Already in libpq format or unknown, return as-is
+        pg_url.to_string()
+    }
 }
 
 /// Read row count from parquet file metadata (footer)
