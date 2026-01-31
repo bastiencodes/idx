@@ -4,6 +4,10 @@
 -- Create the pg_duckdb extension
 CREATE EXTENSION IF NOT EXISTS pg_duckdb;
 
+-- Allow loading unsigned extensions (tidx_abi is not signed)
+ALTER SYSTEM SET duckdb.allow_unsigned_extensions = true;
+SELECT pg_reload_conf();
+
 -- Load tidx_abi extension into DuckDB for ABI decoding functions
 -- This enables: abi_address(), abi_uint(), abi_uint256(), abi_bool(), abi_bytes32()
 SELECT duckdb.raw_query($$ LOAD '/usr/share/duckdb/extensions/tidx_abi.duckdb_extension' $$);
