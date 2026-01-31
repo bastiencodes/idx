@@ -12,7 +12,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::config::ParquetExportConfig;
 use crate::db::Pool;
@@ -318,7 +318,7 @@ async fn find_contiguous_range(
     Ok(Some((start, end_block)))
 }
 
-/// Export logs from PostgreSQL to Parquet using COPY
+/// Export logs from PostgreSQL to Parquet using DuckDB's COPY (via pg_duckdb)
 async fn export_logs_to_parquet(
     pool: &Pool,
     start_block: u64,
@@ -326,85 +326,31 @@ async fn export_logs_to_parquet(
     file_path: &PathBuf,
 ) -> Result<(u64, u64)> {
     let conn = pool.get().await?;
-
-    // Use PostgreSQL's COPY TO with Parquet format (requires pg_duckdb or duckdb_fdw)
-    // Alternative: export to CSV then convert, or use native Parquet writer
     let path_str = file_path.to_string_lossy();
 
-    // Try pg_duckdb COPY TO PARQUET first
-    let result = conn
-        .execute(
-            &format!(
-                r#"
-                COPY (
-                    SELECT * FROM logs 
-                    WHERE block_num >= {} AND block_num <= {}
-                    ORDER BY block_num, log_idx
-                ) TO '{}' WITH (FORMAT PARQUET, COMPRESSION ZSTD)
-                "#,
-                start_block, end_block, path_str
-            ),
-            &[],
-        )
-        .await;
-
-    match result {
-        Ok(row_count) => {
-            // Get file size
-            let file_size = std::fs::metadata(file_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            Ok((row_count, file_size))
-        }
-        Err(e) => {
-            // Fall back to CSV export + parquet conversion
-            warn!(error = %e, "pg_duckdb COPY TO PARQUET failed, falling back to CSV");
-            export_via_csv(pool, start_block, end_block, file_path).await
-        }
-    }
-}
-
-/// Fallback: export to CSV then convert to Parquet
-async fn export_via_csv(
-    pool: &Pool,
-    start_block: u64,
-    end_block: u64,
-    parquet_path: &PathBuf,
-) -> Result<(u64, u64)> {
-    let conn = pool.get().await?;
-    let csv_path = parquet_path.with_extension("csv");
-    let csv_str = csv_path.to_string_lossy();
-
-    // Export to CSV
+    // Use DuckDB's COPY syntax (not PostgreSQL's) via pg_duckdb
+    // DuckDB syntax: COPY (...) TO 'path' (FORMAT PARQUET, COMPRESSION ZSTD)
     let row_count = conn
         .execute(
             &format!(
                 r#"
                 COPY (
-                    SELECT * FROM logs 
+                    SELECT block_num, tx_idx, log_idx, tx_hash, address,
+                           topic0, topic1, topic2, topic3, data
+                    FROM logs 
                     WHERE block_num >= {} AND block_num <= {}
                     ORDER BY block_num, log_idx
-                ) TO '{}'
+                ) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)
                 "#,
-                start_block, end_block, csv_str
+                start_block, end_block, path_str
             ),
             &[],
         )
         .await?;
 
-    // TODO: Convert CSV to Parquet using arrow-rs or external tool
-    // For now, just keep the CSV and warn
-    warn!(
-        "CSV export complete but Parquet conversion not implemented. \
-         Consider installing pg_duckdb for native Parquet export."
-    );
-
-    let file_size = std::fs::metadata(&csv_path)
+    let file_size = std::fs::metadata(file_path)
         .map(|m| m.len())
         .unwrap_or(0);
-
-    // Rename to .parquet for now (it's actually CSV)
-    std::fs::rename(&csv_path, parquet_path)?;
 
     Ok((row_count, file_size))
 }
