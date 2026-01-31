@@ -33,7 +33,7 @@ RUN git clone --depth 1 --branch ${DUCKDB_VERSION} https://github.com/duckdb/ext
 RUN python3 /extension-ci-tools/scripts/append_extension_metadata.py \
     --library-file target/release/libtidx_abi.so \
     --extension-name tidx_abi \
-    --duckdb-platform linux_amd64_gcc4 \
+    --duckdb-platform linux_amd64 \
     --extension-version "0.1.0" \
     --duckdb-version "${DUCKDB_VERSION}"
 
