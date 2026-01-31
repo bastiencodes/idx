@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
+
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -28,19 +28,21 @@ pub struct ParquetRange {
     pub file_size_bytes: u64,
 }
 
-/// Run the Parquet compression loop in background
+use crate::broadcast::BlockUpdate;
+
+/// Run the Parquet export loop in background
 pub async fn run_compress_loop(
     pool: Pool,
     chain_id: u64,
     config: ParquetExportConfig,
     mut shutdown: broadcast::Receiver<()>,
+    mut block_updates: broadcast::Receiver<BlockUpdate>,
 ) -> Result<()> {
     if !config.enabled {
-        debug!(chain_id = chain_id, "Parquet compression disabled");
+        debug!(chain_id = chain_id, "Parquet export disabled");
         return Ok(());
     }
 
-    let interval = Duration::from_secs(config.check_interval_secs);
     let data_dir = PathBuf::from(&config.data_dir);
 
     // Create chain-specific directory
@@ -53,7 +55,6 @@ pub async fn run_compress_loop(
     info!(
         chain_id = chain_id,
         threshold = config.threshold_blocks,
-        interval_secs = config.check_interval_secs,
         data_dir = %chain_dir.display(),
         "Starting Parquet export loop"
     );
@@ -61,6 +62,21 @@ pub async fn run_compress_loop(
     // Ensure parquet_ranges table exists
     create_parquet_ranges_table(&pool).await?;
 
+    // Export any existing backlog immediately on startup
+    loop {
+        match tick_compress(&pool, chain_id, &config, &chain_dir).await {
+            Ok(true) => {
+                tokio::task::yield_now().await;
+            }
+            Ok(false) => break,
+            Err(e) => {
+                error!(error = %e, chain_id = chain_id, "Parquet export tick failed");
+                break;
+            }
+        }
+    }
+
+    // Then wait for new blocks
     loop {
         tokio::select! {
             biased;
@@ -70,27 +86,28 @@ pub async fn run_compress_loop(
                 break;
             }
 
-            _ = async {
-                // Export continuously until caught up, then wait for interval
-                loop {
-                    match tick_compress(&pool, chain_id, &config, &chain_dir).await {
-                        Ok(true) => {
-                            // Exported a batch, immediately try next batch
-                            tokio::task::yield_now().await;
-                        }
-                        Ok(false) => {
-                            // No more blocks to export, wait for new blocks
-                            tokio::time::sleep(interval).await;
-                            break;
-                        }
-                        Err(e) => {
-                            error!(error = %e, chain_id = chain_id, "Parquet export tick failed");
-                            tokio::time::sleep(interval).await;
-                            break;
+            result = block_updates.recv() => {
+                match result {
+                    Ok(update) if update.chain_id == chain_id => {
+                        // New block synced, try to export
+                        loop {
+                            match tick_compress(&pool, chain_id, &config, &chain_dir).await {
+                                Ok(true) => {
+                                    tokio::task::yield_now().await;
+                                }
+                                Ok(false) => break,
+                                Err(e) => {
+                                    error!(error = %e, chain_id = chain_id, "Parquet export tick failed");
+                                    break;
+                                }
+                            }
                         }
                     }
+                    Ok(_) => {} // Different chain
+                    Err(broadcast::error::RecvError::Lagged(_)) => {} // Missed some, will catch up
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-            } => {}
+            }
         }
     }
 

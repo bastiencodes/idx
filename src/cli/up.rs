@@ -227,6 +227,7 @@ fn spawn_sync_engine(
     let chain_id = chain.chain_id;
     let pool_for_parquet = throttled_pool.pool.clone();
     let parquet_shutdown = shutdown_rx.resubscribe();
+    let block_updates = broadcaster.subscribe();
 
     tokio::spawn(async move {
         // Spawn Parquet export task if enabled
@@ -239,6 +240,7 @@ fn spawn_sync_engine(
                         chain_id,
                         config,
                         parquet_shutdown,
+                        block_updates,
                     )
                     .await
                     {
