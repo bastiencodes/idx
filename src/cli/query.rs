@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tidx::config::Config;
 use tidx::db;
-use tidx::service::{self, execute_query_with_engine, QueryOptions};
+use tidx::service::{self, execute_query, PgDuckdbConfig, QueryOptions};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -72,12 +72,16 @@ pub async fn run(args: Args) -> Result<()> {
         limit: args.limit,
     };
 
-    let result = execute_query_with_engine(
+    let pg_duckdb_config = PgDuckdbConfig {
+        memory_limit: chain.pg_duckdb_memory_limit.clone(),
+        threads: chain.pg_duckdb_threads,
+    };
+    let result = execute_query(
         &pool,
-        None, // DuckDB pool not available in CLI yet
         &args.sql,
         args.signature.as_deref(),
         &options,
+        &pg_duckdb_config,
         args.engine.as_deref(),
     )
     .await?;

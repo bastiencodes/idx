@@ -147,9 +147,6 @@ pub struct ChainConfig {
     /// Database connection URL for this chain
     pub pg_url: String,
 
-    /// DuckDB path for this chain (optional, enables OLAP queries)
-    pub duckdb_path: Option<String>,
-
     /// Enable backfill to genesis (default: true)
     #[serde(default = "default_backfill")]
     pub backfill: bool,
@@ -174,44 +171,14 @@ pub struct ChainConfig {
     #[serde(default)]
     pub trust_rpc: bool,
 
-    /// DuckDB gap-fill batch sizes (blocks per batch, optional)
+    /// pg_duckdb memory limit (e.g., "16GB")
     #[serde(default)]
-    pub duckdb_batch_sizes: Option<DuckDbBatchSizes>,
-}
+    pub pg_duckdb_memory_limit: Option<String>,
 
-/// DuckDB gap-fill batch sizes per table type.
-/// Larger batches = faster backfill but more memory.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuckDbBatchSizes {
-    /// Blocks table batch size (default: 50000)
-    #[serde(default = "default_blocks_batch")]
-    pub blocks: i64,
-    /// Transactions table batch size (default: 50000)
-    #[serde(default = "default_txs_batch")]
-    pub txs: i64,
-    /// Logs table batch size (default: 20000)
-    #[serde(default = "default_logs_batch")]
-    pub logs: i64,
-    /// Receipts table batch size (default: 50000)
-    #[serde(default = "default_receipts_batch")]
-    pub receipts: i64,
+    /// pg_duckdb thread count
+    #[serde(default)]
+    pub pg_duckdb_threads: Option<u32>,
 }
-
-impl Default for DuckDbBatchSizes {
-    fn default() -> Self {
-        Self {
-            blocks: 50_000,
-            txs: 50_000,
-            logs: 20_000,
-            receipts: 50_000,
-        }
-    }
-}
-
-fn default_blocks_batch() -> i64 { 50_000 }
-fn default_txs_batch() -> i64 { 50_000 }
-fn default_logs_batch() -> i64 { 20_000 }
-fn default_receipts_batch() -> i64 { 50_000 }
 
 fn default_backfill() -> bool {
     true
@@ -238,5 +205,84 @@ impl Config {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chain_config_with_pg_duckdb_settings() {
+        let toml_str = r#"
+            name = "test"
+            chain_id = 1
+            rpc_url = "http://localhost:8545"
+            pg_url = "postgres://localhost/test"
+            pg_duckdb_memory_limit = "16GB"
+            pg_duckdb_threads = 8
+        "#;
+        
+        let config: ChainConfig = toml::from_str(toml_str).unwrap();
+        
+        assert_eq!(config.pg_duckdb_memory_limit, Some("16GB".to_string()));
+        assert_eq!(config.pg_duckdb_threads, Some(8));
+    }
+
+    #[test]
+    fn test_chain_config_defaults() {
+        let toml_str = r#"
+            name = "test"
+            chain_id = 1
+            rpc_url = "http://localhost:8545"
+            pg_url = "postgres://localhost/test"
+        "#;
+        
+        let config: ChainConfig = toml::from_str(toml_str).unwrap();
+        
+        assert!(config.backfill);
+        assert_eq!(config.batch_size, 100);
+        assert_eq!(config.concurrency, 4);
+    }
+
+    #[test]
+    fn test_full_config_with_multiple_chains() {
+        let toml_str = r#"
+            [http]
+            enabled = true
+            port = 8080
+            
+            [prometheus]
+            enabled = true
+            port = 9090
+            
+            [[chains]]
+            name = "chain1"
+            chain_id = 1
+            rpc_url = "http://localhost:8545"
+            pg_url = "postgres://localhost/chain1"
+            pg_duckdb_memory_limit = "8GB"
+            
+            [[chains]]
+            name = "chain2"
+            chain_id = 2
+            rpc_url = "http://localhost:8546"
+            pg_url = "postgres://localhost/chain2"
+        "#;
+        
+        let config: Config = toml::from_str(toml_str).unwrap();
+        
+        assert_eq!(config.chains.len(), 2);
+        assert_eq!(config.chains[0].pg_duckdb_memory_limit, Some("8GB".to_string()));
+        assert_eq!(config.chains[1].pg_duckdb_memory_limit, None);
+    }
+
+    #[test]
+    fn test_rate_limit_config_default() {
+        let config = RateLimitConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.requests_per_window, 100);
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.max_sse_connections, 5);
     }
 }
