@@ -377,7 +377,8 @@ fn get_table_select_query(table_type: TableType, start_block: u64, end_block: u6
             start_block, end_block
         ),
         TableType::Logs => format!(
-            "SELECT block_num, tx_idx, log_idx, tx_hash, address, topic0, topic1, topic2, topic3, data \
+            "SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, \
+             topic0, topic1, topic2, topic3, data \
              FROM pg.public.logs WHERE block_num >= {} AND block_num <= {} ORDER BY block_num, log_idx",
             start_block, end_block
         ),
@@ -630,6 +631,8 @@ mod tests {
         assert!(query.contains("block_num >= 100"));
         assert!(query.contains("block_num <= 200"));
         assert!(query.contains("ORDER BY block_num, log_idx"));
+        assert!(query.contains("block_timestamp"));
+        assert!(query.contains("selector"));
     }
 
     #[test]
