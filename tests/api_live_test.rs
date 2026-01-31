@@ -273,12 +273,12 @@ async fn test_query_chain_id_param() {
     let (pools, chain_id) = make_pools(db.pool.clone());
     let mut app = make_test_service(pools, chain_id, broadcaster).await;
 
-    // Query with explicit chainId
+    // Query with explicit chainId (use point lookup to route to Postgres, not DuckDB)
     let response = app
         .call(
             Request::builder()
                 .method("GET")
-                .uri("/query?sql=SELECT%20COUNT(*)%20FROM%20blocks&chainId=1")
+                .uri("/query?sql=SELECT%20*%20FROM%20blocks%20WHERE%20num%20%3D%201&chainId=1")
                 .body(Body::empty())
                 .unwrap(),
         )
