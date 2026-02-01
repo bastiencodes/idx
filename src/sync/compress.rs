@@ -77,7 +77,7 @@ pub async fn run_compress_loop(
         }
     }
 
-    // Then wait for new blocks
+    // Then wait for new blocks and update staging files
     loop {
         tokio::select! {
             biased;
@@ -90,7 +90,12 @@ pub async fn run_compress_loop(
             result = block_updates.recv() => {
                 match result {
                     Ok(update) if update.chain_id == chain_id => {
-                        // New block synced, try to export
+                        // Update staging file with latest data
+                        if let Err(e) = update_staging(&pool, chain_id, &chain_dir, &pg_url).await {
+                            debug!(error = %e, chain_id = chain_id, "Staging update failed");
+                        }
+
+                        // Check if we can finalize any ranges
                         loop {
                             match tick_compress(&pool, chain_id, &config, &chain_dir, &pg_url).await {
                                 Ok(true) => {
@@ -109,6 +114,61 @@ pub async fn run_compress_loop(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Update staging parquet files with data since last finalized export.
+/// These staging files are rewritten on each block for near-realtime queries.
+async fn update_staging(
+    pool: &Pool,
+    chain_id: u64,
+    data_dir: &PathBuf,
+    pg_url: &str,
+) -> Result<()> {
+    let conn = pool.get().await?;
+
+    // Get current tip
+    let tip_row = conn
+        .query_opt(
+            "SELECT tip_num FROM sync_state WHERE chain_id = $1",
+            &[&(chain_id as i64)],
+        )
+        .await?;
+
+    let tip_num: u64 = match tip_row {
+        Some(row) => row.get::<_, i64>(0) as u64,
+        None => return Ok(()),
+    };
+
+    // Update staging file for logs table only (most queried)
+    let table_type = TableType::Logs;
+    let last_finalized = get_last_exported_block(pool, chain_id, table_type).await?;
+    
+    // Only create staging if there's data after the last finalized block
+    let start_block = if last_finalized == 0 { 1 } else { last_finalized + 1 };
+    if start_block > tip_num {
+        return Ok(());
+    }
+
+    let staging_path = data_dir.join(format!("{}_staging.parquet", table_type.as_str()));
+    
+    // Export staging file (overwrites previous)
+    match export_table_to_parquet(pool, table_type, start_block, tip_num, &staging_path, pg_url).await {
+        Ok((row_count, _)) => {
+            debug!(
+                chain_id = chain_id,
+                table = table_type.as_str(),
+                start = start_block,
+                end = tip_num,
+                row_count = row_count,
+                "Updated staging parquet"
+            );
+        }
+        Err(e) => {
+            debug!(error = %e, chain_id = chain_id, "Staging export failed");
         }
     }
 
@@ -267,6 +327,14 @@ async fn tick_compress(
             path = %file_path.display(),
             "Parquet export complete"
         );
+
+        // Delete staging file after finalization to avoid duplicate data
+        let staging_path = data_dir.join(format!("{}_staging.parquet", table_type.as_str()));
+        if staging_path.exists() {
+            if let Err(e) = std::fs::remove_file(&staging_path) {
+                debug!(error = %e, path = %staging_path.display(), "Failed to remove staging file");
+            }
+        }
 
         any_exported = true;
     }
