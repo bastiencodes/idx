@@ -305,9 +305,10 @@ fn rewrite_query_for_parquet(sql: &str, config: &ParquetConfig) -> Result<String
     let parquet_glob = format!("{}/{}/logs_*.parquet", data_dir, chain_id);
 
     // Create a CTE that reads from Parquet files
+    // The 'AS r' alias is required by pg_duckdb to access columns normally
     let parquet_cte = format!(
         r#"logs AS (
-    SELECT * FROM read_parquet('{}')
+    SELECT r.* FROM read_parquet('{}') AS r
 )"#,
         parquet_glob
     );
