@@ -6,7 +6,7 @@
 ARG PGDUCKDB_VERSION=16-v0.3.1
 ARG DUCKDB_VERSION=v1.2.0
 ARG PG_PARQUET_VERSION=v0.5.1
-ARG PGRX_VERSION=0.13.1
+ARG PGRX_VERSION=0.16.0
 
 # =============================================================================
 # Stage 1: Build tidx_abi DuckDB extension
