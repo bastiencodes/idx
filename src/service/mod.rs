@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::time::Instant;
 
 use crate::db::Pool;
+use crate::duckdb::DuckDbEngine;
 use crate::metrics;
 use crate::query::{extract_column_references, route_query, validate_query, EventSignature, QueryEngine};
 
@@ -132,6 +133,42 @@ pub struct ParquetConfig {
     pub chain_id: Option<u64>,
     /// Maximum block number in Parquet files (blocks > this are in PG)
     pub max_parquet_block: Option<u64>,
+}
+
+/// Execute a query using the native in-process DuckDB engine.
+/// This bypasses pg_duckdb entirely and reads Parquet files directly.
+pub fn execute_query_native_duckdb(
+    engine: &DuckDbEngine,
+    sql: &str,
+    signature: Option<&str>,
+    options: &QueryOptions,
+) -> Result<QueryResult> {
+    // Validate query
+    validate_query(sql)?;
+    
+    // Add LIMIT if not present
+    let sql_upper = sql.to_uppercase();
+    let sql = if !sql_upper.contains("LIMIT") {
+        format!("{sql} LIMIT {}", options.limit)
+    } else {
+        sql.to_string()
+    };
+    
+    let start = Instant::now();
+    let result = engine.query(&sql, signature)?;
+    let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    
+    metrics::record_query_duration(elapsed);
+    metrics::record_query_rows(result.row_count as u64);
+    
+    Ok(QueryResult {
+        columns: result.columns,
+        rows: result.rows,
+        row_count: result.row_count,
+        engine: Some("duckdb-native".to_string()),
+        query_time_ms: Some(elapsed_ms),
+    })
 }
 
 /// Execute a query with pg_duckdb support.
