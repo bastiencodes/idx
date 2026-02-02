@@ -588,10 +588,10 @@ pub fn rewrite_for_late_decode(
     // This is a simple string replacement - works for most cases
     let mut rewritten_sql = sql.replace(&event_name, &raw_name);
     
-    // Track which decoded columns were replaced so we can decode them in outer SELECT
-    let mut replaced_columns: Vec<&ColumnMapping> = Vec::new();
+    // Track which decoded columns were replaced for outer SELECT decode
+    let mut group_order_columns: Vec<&ColumnMapping> = Vec::new();
     
-    // Replace decoded column names with raw columns
+    // Replace ALL decoded column names with their decode expressions or raw columns
     for mapping in &mappings {
         let decoded = &mapping.decoded_name;
         let raw = &mapping.raw_column;
@@ -601,7 +601,8 @@ pub fn rewrite_for_late_decode(
         let in_order_by = order_by_cols.contains(&decoded.to_lowercase());
         
         if in_group_by || in_order_by {
-            replaced_columns.push(mapping);
+            // GROUP BY/ORDER BY columns: replace with raw, decode in outer SELECT
+            group_order_columns.push(mapping);
             
             // Replace quoted versions: "from" -> topic1
             rewritten_sql = rewritten_sql.replace(&format!("\"{decoded}\""), raw);
@@ -610,21 +611,29 @@ pub fn rewrite_for_late_decode(
             rewritten_sql = rewritten_sql.replace(&format!(" {decoded},"), &format!(" {raw},"));
             rewritten_sql = rewritten_sql.replace(&format!(",{decoded} "), &format!(",{raw} "));
             rewritten_sql = rewritten_sql.replace(&format!(",{decoded},"), &format!(",{raw},"));
+        } else {
+            // Non-GROUP-BY columns (e.g. SUM(value)): replace with inline decode expression
+            let decode_expr = &mapping.decode_expr;
+            
+            // Replace quoted versions: "value" -> abi_uint(data, 0)
+            rewritten_sql = rewritten_sql.replace(&format!("\"{decoded}\""), decode_expr);
+            // Replace unquoted in common positions
+            rewritten_sql = rewritten_sql.replace(&format!("({decoded})"), &format!("({decode_expr})"));
+            rewritten_sql = rewritten_sql.replace(&format!("({decoded},"), &format!("({decode_expr},"));
+            rewritten_sql = rewritten_sql.replace(&format!(", {decoded})"), &format!(", {decode_expr})"));
         }
     }
     
-    // Build outer SELECT that decodes the replaced columns
-    // Format: SELECT decode(raw_col) AS "decoded_name", other_col, ... FROM (inner_query)
+    // Build outer SELECT that decodes the GROUP BY/ORDER BY columns
     let mut outer_selects = Vec::new();
-    for mapping in &replaced_columns {
+    for mapping in &group_order_columns {
         outer_selects.push(format!(
             "{} AS \"{}\"",
             mapping.decode_expr, mapping.decoded_name
         ));
     }
     
-    // Add * to capture other columns (aggregates, etc.) that weren't replaced
-    // We use a subquery alias to reference non-replaced columns
+    // Add * to capture other columns (aggregates, etc.)
     outer_selects.push("*".to_string());
     
     // Build the final SQL with decode wrapper
