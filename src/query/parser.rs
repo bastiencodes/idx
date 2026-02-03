@@ -247,6 +247,78 @@ impl EventSignature {
             .collect()
     }
 
+    /// Returns a mapping of decoded column name -> (raw_column, AbiType, is_indexed).
+    /// For indexed params, raw_column is "topic1", "topic2", etc.
+    /// For non-indexed params, raw_column is "data" with offset info encoded.
+    pub fn column_mapping(&self) -> HashMap<String, (String, AbiType, bool)> {
+        let mut mapping = HashMap::new();
+        let mut topic_idx = 1; // topic0 is selector, indexed params start at topic1
+
+        for (i, param) in self.params.iter().enumerate() {
+            let col_name = param
+                .name
+                .as_deref()
+                .map_or_else(|| format!("arg{i}"), |n| n.to_string());
+
+            if param.indexed {
+                mapping.insert(
+                    col_name.to_lowercase(),
+                    (format!("topic{}", topic_idx), param.ty.clone(), true),
+                );
+                topic_idx += 1;
+            } else {
+                // Non-indexed params come from data - pushdown not supported yet
+                mapping.insert(
+                    col_name.to_lowercase(),
+                    ("data".to_string(), param.ty.clone(), false),
+                );
+            }
+        }
+
+        mapping
+    }
+
+    /// Rewrite a SQL query to push down filters on decoded columns to use indexed raw columns.
+    /// E.g., WHERE "from" = '0xabc...' becomes WHERE topic1 = '\x000...abc...'
+    pub fn rewrite_filters_for_pushdown(&self, sql: &str) -> String {
+        let mapping = self.column_mapping();
+        let filters = extract_equality_filters(sql);
+
+        let mut result = sql.to_string();
+
+        for (col, value) in filters {
+            let col_lower = col.to_lowercase();
+            if let Some((raw_col, ty, is_indexed)) = mapping.get(&col_lower) {
+                // Only push down indexed columns (topics)
+                if !is_indexed {
+                    continue;
+                }
+
+                if let Some(encoded) = self.encode_value_for_pushdown(ty, &value) {
+                    // Build the replacement patterns
+                    // Match: "col" = 'value' or "col" = '0xvalue'
+                    let patterns = [
+                        format!(r#""{}" = '{}'"#, col, value),
+                        format!(r#""{}" = '0x{}'"#, col, value.strip_prefix("0x").unwrap_or(&value)),
+                        format!(r#""{}"='{}'"#, col, value),
+                        format!(r#""{}"='0x{}'"#, col, value.strip_prefix("0x").unwrap_or(&value)),
+                    ];
+
+                    let replacement = format!("{} = '0x{}'", raw_col, encoded);
+
+                    for pattern in &patterns {
+                        if result.contains(pattern) {
+                            result = result.replace(pattern, &replacement);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     /// Encode a filter value based on the ABI type.
     fn encode_value_for_pushdown(&self, ty: &AbiType, value: &str) -> Option<String> {
         match ty {
@@ -993,6 +1065,86 @@ mod tests {
     fn test_extract_order_by_columns() {
         let cols = extract_order_by_columns("SELECT * FROM transfer ORDER BY \"from\" DESC");
         assert!(cols.contains("from"));
+    }
+
+    // ========================================================================
+    // Predicate Pushdown Tests
+    // ========================================================================
+
+    #[test]
+    fn test_column_mapping() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+
+        let mapping = sig.column_mapping();
+        
+        // "from" is first indexed param -> topic1
+        let (col, ty, indexed) = mapping.get("from").unwrap();
+        assert_eq!(col, "topic1");
+        assert!(matches!(ty, AbiType::Address));
+        assert!(indexed);
+        
+        // "to" is second indexed param -> topic2
+        let (col, ty, indexed) = mapping.get("to").unwrap();
+        assert_eq!(col, "topic2");
+        assert!(matches!(ty, AbiType::Address));
+        assert!(indexed);
+        
+        // "value" is not indexed -> data
+        let (col, _, indexed) = mapping.get("value").unwrap();
+        assert_eq!(col, "data");
+        assert!(!indexed);
+    }
+
+    #[test]
+    fn test_rewrite_filters_address() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+
+        let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xdAC17F958D2ee523a2206206994597C13D831ec7'"#;
+        let rewritten = sig.rewrite_filters_for_pushdown(sql);
+        
+        // Should rewrite "from" = '0x...' to topic1 = '0x000...dac17f...'
+        assert!(rewritten.contains("topic1 = '0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7'"));
+        assert!(!rewritten.contains(r#""from" ="#));
+    }
+
+    #[test]
+    fn test_rewrite_filters_multiple() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+
+        let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xabc' AND "to" = '0xdef'"#;
+        let rewritten = sig.rewrite_filters_for_pushdown(sql);
+        
+        // Should rewrite both (though abc/def are invalid addresses, encoding returns None)
+        // Let's use valid addresses
+        let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xdAC17F958D2ee523a2206206994597C13D831ec7' AND "to" = '0xa726a1CD723409074DF9108A2187cfA19899aCF8'"#;
+        let rewritten = sig.rewrite_filters_for_pushdown(sql);
+        
+        assert!(rewritten.contains("topic1 = '0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7'"));
+        assert!(rewritten.contains("topic2 = '0x000000000000000000000000a726a1cd723409074df9108a2187cfa19899acf8'"));
+    }
+
+    #[test]
+    fn test_rewrite_filters_non_indexed_unchanged() {
+        let sig = EventSignature::parse(
+            "Transfer(address indexed from, address indexed to, uint256 value)",
+        )
+        .unwrap();
+
+        // "value" is not indexed, should not be rewritten
+        let sql = r#"SELECT * FROM Transfer WHERE "value" = '1000000'"#;
+        let rewritten = sig.rewrite_filters_for_pushdown(sql);
+        
+        // Should remain unchanged since we don't push down non-indexed columns
+        assert_eq!(sql, rewritten);
     }
 
 }

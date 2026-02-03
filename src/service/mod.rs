@@ -127,7 +127,11 @@ pub async fn execute_query_postgres(
     // Generate CTE SQL if a signature is provided
     let sql = if let Some(sig_str) = signature {
         let sig = EventSignature::parse(sig_str)?;
-        let used_columns = extract_column_references(sql);
+        
+        // Rewrite filters to push down to indexed columns (e.g., "from" = '0x...' -> topic1 = '0x...')
+        let sql = sig.rewrite_filters_for_pushdown(sql);
+        
+        let used_columns = extract_column_references(&sql);
         let filter = if used_columns.is_empty() {
             None
         } else {
