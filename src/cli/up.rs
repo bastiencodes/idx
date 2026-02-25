@@ -15,7 +15,9 @@ use tidx::broadcast::Broadcaster;
 use tidx::clickhouse::ClickHouseEngine;
 use tidx::config::{ChainConfig, Config, ConfigWatcher, NewChainEvent};
 use tidx::db::{self, ThrottledPool};
+use tidx::sync::ch_sink::ClickHouseSink;
 use tidx::sync::engine::SyncEngine;
+use tidx::sync::sink::SinkSet;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -74,12 +76,6 @@ pub async fn run(args: Args) -> Result<()> {
     let clickhouse_engines: SharedClickHouseEngines = Arc::new(RwLock::new(HashMap::new()));
     let mut default_chain_id = 0u64;
 
-    // Collect ClickHouse engines that need replication setup.
-    // These must be initialized sequentially (not spawned concurrently) because
-    // ClickHouse's MaterializedPostgreSQL engine can stall when multiple CREATE
-    // DATABASE commands race on the same instance.
-    let mut pending_replication: Vec<(Arc<ClickHouseEngine>, String, String)> = Vec::new();
-
     for chain in &config.chains {
         let throttled_pool = initialize_chain(chain, Arc::clone(&clickhouse_configs)).await?;
 
@@ -90,11 +86,9 @@ pub async fn run(args: Args) -> Result<()> {
         // Initialize ClickHouse if configured (for each chain)
         if let Some(ref ch_config) = chain.clickhouse {
             if ch_config.enabled {
-                let pg_url = chain.resolved_pg_url()?;
-                match ClickHouseEngine::new(ch_config, chain.chain_id, &pg_url) {
+                match ClickHouseEngine::new(ch_config, chain.chain_id) {
                     Ok(engine) => {
                         let engine = Arc::new(engine);
-                        pending_replication.push((Arc::clone(&engine), pg_url, chain.name.clone()));
                         clickhouse_engines
                             .write()
                             .await
@@ -125,17 +119,6 @@ pub async fn run(args: Args) -> Result<()> {
             broadcaster.clone(),
             shutdown_tx.subscribe(),
         );
-    }
-
-    // Set up ClickHouse replication sequentially to avoid race conditions.
-    if !pending_replication.is_empty() {
-        tokio::spawn(async move {
-            for (engine, pg_url, chain_name) in pending_replication {
-                if let Err(e) = engine.ensure_replication(&pg_url).await {
-                    error!(error = %e, chain = %chain_name, "Failed to set up ClickHouse replication");
-                }
-            }
-        });
     }
 
     let (chain_tx, mut chain_rx) = tokio::sync::mpsc::channel::<NewChainEvent>(16);
@@ -292,8 +275,62 @@ fn spawn_sync_engine(
     let trust_rpc = chain.trust_rpc;
 
     tokio::spawn(async move {
-        // Create sync engine with throttled pool
-        let mut engine = match SyncEngine::new(throttled_pool, &chain.rpc_url).await {
+        // Build SinkSet with PG (always) + optional ClickHouse direct-write sink
+        let mut sinks = SinkSet::new(throttled_pool.inner().clone());
+
+        if let Some(ref ch_config) = chain.clickhouse {
+            if ch_config.enabled {
+                let database = ch_config
+                    .database
+                    .clone()
+                    .unwrap_or_else(|| format!("tidx_{}", chain.chain_id));
+
+                match ClickHouseSink::new(&ch_config.url, &database) {
+                    Ok(ch_sink) => {
+                        if let Err(e) = ch_sink.ensure_schema().await {
+                            error!(
+                                error = %e,
+                                chain = %chain.name,
+                                "Failed to initialize ClickHouse schema (continuing without CH sink)"
+                            );
+                        } else {
+                            info!(
+                                chain = %chain.name,
+                                database = %database,
+                                "ClickHouse direct-write sink enabled"
+                            );
+                            sinks = sinks.with_clickhouse(ch_sink);
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            chain = %chain.name,
+                            "Failed to create ClickHouse sink (continuing without CH)"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Auto-backfill ClickHouse from PostgreSQL in background (non-blocking).
+        // SyncEngine starts immediately so new blocks are indexed while CH catches up.
+        {
+            let backfill_sinks = sinks.clone();
+            let backfill_chain_name = chain.name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = backfill_sinks.backfill_clickhouse().await {
+                    error!(
+                        error = %e,
+                        chain = %backfill_chain_name,
+                        "ClickHouse backfill failed (CH will catch up during sync)"
+                    );
+                }
+            });
+        }
+
+        // Create sync engine with throttled pool and configured sinks
+        let mut engine = match SyncEngine::new(throttled_pool, sinks, &chain.rpc_url).await {
             Ok(e) => e
                 .with_broadcaster(broadcaster)
                 .with_batch_size(chain.batch_size)
@@ -306,8 +343,6 @@ fn spawn_sync_engine(
             }
         };
 
-        // Run the sync engine - handles both realtime sync and gap sync
-        // Gap sync fills ALL gaps from most recent to earliest (replaces backfill)
         if let Err(e) = engine.run(shutdown_rx).await {
             error!(error = %e, chain = %chain.name, "Sync engine failed");
         }
