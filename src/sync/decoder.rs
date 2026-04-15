@@ -2,9 +2,8 @@ use alloy::consensus::transaction::Recovered;
 use alloy::consensus::{Transaction as TransactionTrait, Typed2718};
 use alloy::network::{ReceiptResponse, TransactionResponse};
 use chrono::{DateTime, TimeZone, Utc};
-use tempo_alloy::primitives::transaction::SignatureType;
 
-use crate::chain::{Block, Log, Receipt, TempoTxEnvelope, Transaction};
+use crate::chain::{Block, Log, Receipt, Transaction};
 use crate::types::{BlockRow, LogRow, ReceiptRow, TxRow};
 
 pub fn timestamp_from_secs(secs: u64) -> DateTime<Utc> {
@@ -33,27 +32,20 @@ pub fn decode_block(block: &Block) -> BlockRow {
 
 pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
     let block_timestamp = timestamp_from_secs(block.header.timestamp);
-    let inner: &Recovered<TempoTxEnvelope> = &tx.inner;
+    let inner: &Recovered<_> = &tx.inner;
+    let tx_type = inner.ty() as u8;
 
-    // Extract Tempo-specific fields if this is a 0x76 transaction
+    // Keep Tempo-only columns nullable/defaulted for generic EVM indexing.
     let (nonce_key, fee_token, calls_json, call_count, valid_before, valid_after, signature_type) =
-        if let TempoTxEnvelope::AA(aa_signed) = inner.as_ref() {
-            let tempo_tx = aa_signed.tx();
-            (
-                tempo_tx.nonce_key.to_be_bytes_vec(),
-                tempo_tx.fee_token.map(|a| a.as_slice().to_vec()),
-                serde_json::to_value(&tempo_tx.calls).ok(),
-                tempo_tx.calls.len() as i16,
-                tempo_tx.valid_before.map(|v| v as i64),
-                tempo_tx.valid_after.map(|v| v as i64),
-                Some(match aa_signed.signature().signature_type() {
-                    SignatureType::Secp256k1 => 0,
-                    SignatureType::P256 => 1,
-                    SignatureType::WebAuthn => 2,
-                }),
-            )
+        if matches!(tx_type, 0x0..=0x3) {
+            (vec![0u8; 32], None, None, 1, None, None, None)
         } else {
-            (vec![0u8; 32], None, None, 1, None, None, Some(0))
+            tracing::debug!(
+                tx_type,
+                tx_hash = %tx.tx_hash(),
+                "Unknown transaction type; applying generic fallback defaults"
+            );
+            (vec![0u8; 32], None, None, 1, None, None, None)
         };
 
     TxRow {
@@ -61,7 +53,7 @@ pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
         block_timestamp,
         idx: idx as i32,
         hash: tx.tx_hash().as_slice().to_vec(),
-        tx_type: inner.ty() as i16,
+        tx_type: tx_type as i16,
         from: inner.signer().as_slice().to_vec(),
         to: inner.to().map(|a| a.as_slice().to_vec()),
         value: inner.value().to_string(),
