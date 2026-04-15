@@ -12,15 +12,7 @@ CREATE TABLE IF NOT EXISTS txs (
     max_fee_per_gas         TEXT NOT NULL,
     max_priority_fee_per_gas TEXT NOT NULL,
     gas_used                INT8,
-    nonce_key               BYTEA NOT NULL,
     nonce                   INT8 NOT NULL,
-    fee_token               BYTEA,
-    fee_payer               BYTEA,
-    calls                   JSONB,
-    call_count              INT2 NOT NULL DEFAULT 1,
-    valid_before            INT8,
-    valid_after             INT8,
-    signature_type          INT2,
     PRIMARY KEY (block_timestamp, block_num, idx)
 );
 
@@ -30,5 +22,15 @@ DROP INDEX IF EXISTS idx_txs_block_num_asc;
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
 DROP INDEX IF EXISTS idx_txs_calls;
-CREATE INDEX IF NOT EXISTS idx_txs_calls_partial ON txs USING GIN (calls) WHERE calls IS NOT NULL AND call_count > 1;
 DROP INDEX IF EXISTS idx_txs_selector;
+
+-- Migration: remove legacy Tempo-only columns/indexes.
+DROP INDEX IF EXISTS idx_txs_calls_partial;
+ALTER TABLE txs DROP COLUMN IF EXISTS nonce_key;
+ALTER TABLE txs DROP COLUMN IF EXISTS fee_token;
+ALTER TABLE txs DROP COLUMN IF EXISTS fee_payer;
+ALTER TABLE txs DROP COLUMN IF EXISTS calls;
+ALTER TABLE txs DROP COLUMN IF EXISTS call_count;
+ALTER TABLE txs DROP COLUMN IF EXISTS valid_before;
+ALTER TABLE txs DROP COLUMN IF EXISTS valid_after;
+ALTER TABLE txs DROP COLUMN IF EXISTS signature_type;

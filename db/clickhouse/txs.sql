@@ -12,15 +12,17 @@ CREATE TABLE IF NOT EXISTS txs (
     max_fee_per_gas         String,
     max_priority_fee_per_gas String,
     gas_used                Nullable(Int64),
-    nonce_key               String,
-    nonce                   Int64,
-    fee_token               Nullable(String),
-    fee_payer               Nullable(String),
-    calls                   Nullable(String),
-    call_count              Int16,
-    valid_before            Nullable(Int64),
-    valid_after             Nullable(Int64),
-    signature_type          Nullable(Int16)
+    nonce                   Int64
 ) ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(block_timestamp)
-ORDER BY (block_num, idx)
+ORDER BY (block_num, idx);
+
+-- Migration: remove legacy Tempo-only columns.
+ALTER TABLE txs DROP COLUMN IF EXISTS nonce_key;
+ALTER TABLE txs DROP COLUMN IF EXISTS fee_token;
+ALTER TABLE txs DROP COLUMN IF EXISTS fee_payer;
+ALTER TABLE txs DROP COLUMN IF EXISTS calls;
+ALTER TABLE txs DROP COLUMN IF EXISTS call_count;
+ALTER TABLE txs DROP COLUMN IF EXISTS valid_before;
+ALTER TABLE txs DROP COLUMN IF EXISTS valid_after;
+ALTER TABLE txs DROP COLUMN IF EXISTS signature_type;

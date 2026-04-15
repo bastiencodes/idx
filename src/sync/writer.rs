@@ -103,9 +103,7 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
             block_num INT8, block_timestamp TIMESTAMPTZ, idx INT4, hash BYTEA,
             type INT2, \"from\" BYTEA, \"to\" BYTEA, value TEXT, input BYTEA,
             gas_limit INT8, max_fee_per_gas TEXT, max_priority_fee_per_gas TEXT,
-            gas_used INT8, nonce_key BYTEA, nonce INT8, fee_token BYTEA,
-            fee_payer BYTEA, calls JSONB, call_count INT2, valid_before INT8,
-            valid_after INT8, signature_type INT2
+            gas_used INT8, nonce INT8
         ) ON COMMIT DROP",
         &[],
     )
@@ -125,23 +123,14 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
         Type::TEXT,       // max_fee_per_gas
         Type::TEXT,       // max_priority_fee_per_gas
         Type::INT8,       // gas_used
-        Type::BYTEA,      // nonce_key
         Type::INT8,       // nonce
-        Type::BYTEA,      // fee_token
-        Type::BYTEA,      // fee_payer
-        Type::JSONB,      // calls
-        Type::INT2,       // call_count
-        Type::INT8,       // valid_before
-        Type::INT8,       // valid_after
-        Type::INT2,       // signature_type
     ];
 
     let sink = tx
         .copy_in(
             r#"COPY _staging_txs (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
                 gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used,
-                nonce_key, nonce, fee_token, fee_payer, calls, call_count,
-                valid_before, valid_after, signature_type) FROM STDIN BINARY"#,
+                nonce) FROM STDIN BINARY"#,
         )
         .await?;
 
@@ -165,15 +154,7 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
                 &tx.max_fee_per_gas,
                 &tx.max_priority_fee_per_gas,
                 &tx.gas_used,
-                &tx.nonce_key,
                 &tx.nonce,
-                &tx.fee_token,
-                &tx.fee_payer,
-                &tx.calls,
-                &tx.call_count,
-                &tx.valid_before,
-                &tx.valid_after,
-                &tx.signature_type,
             ])
             .await?;
     }
@@ -430,9 +411,7 @@ pub async fn write_batch(
                 block_num INT8, block_timestamp TIMESTAMPTZ, idx INT4, hash BYTEA,
                 type INT2, \"from\" BYTEA, \"to\" BYTEA, value TEXT, input BYTEA,
                 gas_limit INT8, max_fee_per_gas TEXT, max_priority_fee_per_gas TEXT,
-                gas_used INT8, nonce_key BYTEA, nonce INT8, fee_token BYTEA,
-                fee_payer BYTEA, calls JSONB, call_count INT2, valid_before INT8,
-                valid_after INT8, signature_type INT2
+                gas_used INT8, nonce INT8
             ) ON COMMIT DROP",
             &[],
         )
@@ -452,23 +431,14 @@ pub async fn write_batch(
             Type::TEXT,        // max_fee_per_gas
             Type::TEXT,        // max_priority_fee_per_gas
             Type::INT8,        // gas_used
-            Type::BYTEA,       // nonce_key
             Type::INT8,        // nonce
-            Type::BYTEA,       // fee_token
-            Type::BYTEA,       // fee_payer
-            Type::JSONB,       // calls
-            Type::INT2,        // call_count
-            Type::INT8,        // valid_before
-            Type::INT8,        // valid_after
-            Type::INT2,        // signature_type
         ];
 
         let sink = tx
             .copy_in(
                 r#"COPY _staging_txs (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
                 gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used,
-                nonce_key, nonce, fee_token, fee_payer, calls, call_count,
-                valid_before, valid_after, signature_type) FROM STDIN BINARY"#,
+                nonce) FROM STDIN BINARY"#,
             )
             .await?;
 
@@ -492,15 +462,7 @@ pub async fn write_batch(
                     &tx_row.max_fee_per_gas,
                     &tx_row.max_priority_fee_per_gas,
                     &tx_row.gas_used,
-                    &tx_row.nonce_key,
                     &tx_row.nonce,
-                    &tx_row.fee_token,
-                    &tx_row.fee_payer,
-                    &tx_row.calls,
-                    &tx_row.call_count,
-                    &tx_row.valid_before,
-                    &tx_row.valid_after,
-                    &tx_row.signature_type,
                 ])
                 .await?;
         }

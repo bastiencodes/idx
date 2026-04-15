@@ -322,8 +322,7 @@ async fn fetch_txs(conn: &deadpool_postgres::Object, from: i64, to: i64) -> Resu
         .query(
             "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input, \
              gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, \
-             nonce_key, nonce, fee_token, fee_payer, calls, call_count, \
-             valid_before, valid_after, signature_type \
+             nonce \
              FROM txs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, idx",
             &[&from, &to],
         )
@@ -345,15 +344,7 @@ async fn fetch_txs(conn: &deadpool_postgres::Object, from: i64, to: i64) -> Resu
             max_fee_per_gas: r.get(10),
             max_priority_fee_per_gas: r.get(11),
             gas_used: r.get(12),
-            nonce_key: r.get(13),
-            nonce: r.get(14),
-            fee_token: r.get(15),
-            fee_payer: r.get(16),
-            calls: r.get(17),
-            call_count: r.get(18),
-            valid_before: r.get(19),
-            valid_after: r.get(20),
-            signature_type: r.get(21),
+            nonce: r.get(13),
         })
         .collect())
 }

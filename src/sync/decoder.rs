@@ -34,19 +34,13 @@ pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
     let block_timestamp = timestamp_from_secs(block.header.timestamp);
     let inner: &Recovered<_> = &tx.inner;
     let tx_type = inner.ty() as u8;
-
-    // Keep Tempo-only columns nullable/defaulted for generic EVM indexing.
-    let (nonce_key, fee_token, calls_json, call_count, valid_before, valid_after, signature_type) =
-        if matches!(tx_type, 0x0..=0x3) {
-            (vec![0u8; 32], None, None, 1, None, None, None)
-        } else {
-            tracing::debug!(
-                tx_type,
-                tx_hash = %tx.tx_hash(),
-                "Unknown transaction type; applying generic fallback defaults"
-            );
-            (vec![0u8; 32], None, None, 1, None, None, None)
-        };
+    if !matches!(tx_type, 0x0..=0x3) {
+        tracing::debug!(
+            tx_type,
+            tx_hash = %tx.tx_hash(),
+            "Unknown transaction type; decoding with generic EVM fields"
+        );
+    }
 
     TxRow {
         block_num: block.header.number as i64,
@@ -62,15 +56,7 @@ pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
         max_fee_per_gas: inner.max_fee_per_gas().to_string(),
         max_priority_fee_per_gas: inner.max_priority_fee_per_gas().map_or("0".into(), |v| v.to_string()),
         gas_used: None,
-        nonce_key,
         nonce: inner.nonce() as i64,
-        fee_token,
-        fee_payer: None, // Recovered from receipt
-        calls: calls_json,
-        call_count,
-        valid_before,
-        valid_after,
-        signature_type,
     }
 }
 
@@ -97,7 +83,7 @@ pub fn decode_log(log: &Log, block_timestamp: DateTime<Utc>) -> LogRow {
     }
 }
 
-/// Enrich transaction rows with fields that come from receipts (gas_used, fee_payer).
+/// Enrich transaction rows with fields that come from receipts (gas_used).
 /// Must be called after both txs and receipts are decoded.
 pub fn enrich_txs_from_receipts(txs: &mut [TxRow], receipts: &[ReceiptRow]) {
     use std::collections::HashMap;
@@ -108,7 +94,6 @@ pub fn enrich_txs_from_receipts(txs: &mut [TxRow], receipts: &[ReceiptRow]) {
     for tx in txs.iter_mut() {
         if let Some(r) = receipt_map.get(&(tx.block_num, tx.idx)) {
             tx.gas_used = Some(r.gas_used);
-            tx.fee_payer = r.fee_payer.clone();
         }
     }
 }
@@ -125,42 +110,38 @@ mod tests {
         }
     }
 
-    fn make_receipt(block_num: i64, tx_idx: i32, gas_used: i64, fee_payer: Option<Vec<u8>>) -> ReceiptRow {
+    fn make_receipt(block_num: i64, tx_idx: i32, gas_used: i64) -> ReceiptRow {
         ReceiptRow {
             block_num,
             tx_idx,
             gas_used,
-            fee_payer,
             ..Default::default()
         }
     }
 
     #[test]
-    fn enrich_sets_gas_used_and_fee_payer() {
+    fn enrich_sets_gas_used() {
         let mut txs = vec![make_tx(1, 0), make_tx(1, 1)];
         let receipts = vec![
-            make_receipt(1, 0, 21000, Some(vec![0xaa; 20])),
-            make_receipt(1, 1, 50000, Some(vec![0xbb; 20])),
+            make_receipt(1, 0, 21000),
+            make_receipt(1, 1, 50000),
         ];
 
         enrich_txs_from_receipts(&mut txs, &receipts);
 
         assert_eq!(txs[0].gas_used, Some(21000));
-        assert_eq!(txs[0].fee_payer, Some(vec![0xaa; 20]));
         assert_eq!(txs[1].gas_used, Some(50000));
-        assert_eq!(txs[1].fee_payer, Some(vec![0xbb; 20]));
     }
 
     #[test]
     fn enrich_leaves_unmatched_txs_as_none() {
         let mut txs = vec![make_tx(1, 0), make_tx(2, 0)];
-        let receipts = vec![make_receipt(1, 0, 21000, None)];
+        let receipts = vec![make_receipt(1, 0, 21000)];
 
         enrich_txs_from_receipts(&mut txs, &receipts);
 
         assert_eq!(txs[0].gas_used, Some(21000));
         assert_eq!(txs[1].gas_used, None);
-        assert_eq!(txs[1].fee_payer, None);
     }
 
     #[test]
@@ -173,7 +154,7 @@ mod tests {
     #[test]
     fn enrich_empty_txs_is_noop() {
         let mut txs: Vec<TxRow> = vec![];
-        let receipts = vec![make_receipt(1, 0, 21000, None)];
+        let receipts = vec![make_receipt(1, 0, 21000)];
         enrich_txs_from_receipts(&mut txs, &receipts);
         assert!(txs.is_empty());
     }
@@ -186,19 +167,16 @@ mod tests {
             make_tx(11, 0),
         ];
         let receipts = vec![
-            make_receipt(10, 0, 21000, Some(vec![0x01; 20])),
-            make_receipt(10, 1, 42000, None),
-            make_receipt(11, 0, 63000, Some(vec![0x02; 20])),
+            make_receipt(10, 0, 21000),
+            make_receipt(10, 1, 42000),
+            make_receipt(11, 0, 63000),
         ];
 
         enrich_txs_from_receipts(&mut txs, &receipts);
 
         assert_eq!(txs[0].gas_used, Some(21000));
-        assert_eq!(txs[0].fee_payer, Some(vec![0x01; 20]));
         assert_eq!(txs[1].gas_used, Some(42000));
-        assert_eq!(txs[1].fee_payer, None);
         assert_eq!(txs[2].gas_used, Some(63000));
-        assert_eq!(txs[2].fee_payer, Some(vec![0x02; 20]));
     }
 }
 

@@ -200,15 +200,6 @@ async fn test_seeded_tx_variance() {
         return;
     }
 
-    // Check call_count distribution (multicalls should have call_count > 1)
-    let multicalls: i64 = conn
-        .query_one("SELECT COUNT(*) FROM txs WHERE call_count > 1", &[])
-        .await
-        .expect("Failed to count multicalls")
-        .get(0);
-
-    println!("Multicall txs: {multicalls}");
-
     // Check address diversity
     let unique_froms: i64 = conn
         .query_one("SELECT COUNT(DISTINCT \"from\") FROM txs", &[])

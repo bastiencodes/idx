@@ -45,15 +45,7 @@ fn generate_txs(count: usize, block_num: i64) -> Vec<TxRow> {
             max_fee_per_gas: "1000000000".to_string(),
             max_priority_fee_per_gas: "100000000".to_string(),
             gas_used: Some(21000),
-            nonce_key: vec![1u8; 20],
             nonce: i as i64,
-            fee_token: None,
-            fee_payer: None,
-            calls: None,
-            call_count: 1,
-            valid_before: None,
-            valid_after: None,
-            signature_type: Some(0),
         })
         .collect()
 }

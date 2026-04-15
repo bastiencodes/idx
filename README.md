@@ -488,14 +488,7 @@ All tables use composite primary keys with timestamps for efficient range querie
 | `max_fee_per_gas` | `TEXT` | Max fee per gas |
 | `max_priority_fee_per_gas` | `TEXT` | Max priority fee |
 | `gas_used` | `INT8` | Gas consumed |
-| `nonce_key` | `BYTEA` | Nonce key (2D nonces) |
 | `nonce` | `INT8` | Nonce value |
-| `fee_token` | `BYTEA` | Fee token address |
-| `calls` | `JSONB` | Batch call data |
-| `call_count` | `INT2` | Number of calls |
-| `valid_before` | `INT8` | Validity window start |
-| `valid_after` | `INT8` | Validity window end |
-| `signature_type` | `INT2` | Signature type |
 
 ### logs
 

@@ -107,15 +107,7 @@ pub async fn seed(pool: &Pool, config: &SeedConfig) -> Result<(u64, i64, u64)> {
                     max_fee_per_gas: "1000000000".to_string(),
                     max_priority_fee_per_gas: "100000000".to_string(),
                     gas_used: Some(21000 + rng.random_range(0..50000)),
-                    nonce_key: from_addr,
                     nonce: i64::from(rng.random_range(0..10000)),
-                    fee_token: None,
-                    fee_payer: None,
-                    calls: None,
-                    call_count: 1,
-                    valid_before: None,
-                    valid_after: None,
-                    signature_type: Some(0),
                 });
 
                 let num_logs = rng.random_range(1..=4);

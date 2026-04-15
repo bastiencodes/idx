@@ -364,15 +364,7 @@ struct ChTxWire {
     max_fee_per_gas: String,
     max_priority_fee_per_gas: String,
     gas_used: Option<i64>,
-    nonce_key: String,
     nonce: i64,
-    fee_token: Option<String>,
-    fee_payer: Option<String>,
-    calls: Option<String>,
-    call_count: i16,
-    valid_before: Option<i64>,
-    valid_after: Option<i64>,
-    signature_type: Option<i16>,
 }
 
 impl ChTxWire {
@@ -391,15 +383,7 @@ impl ChTxWire {
             max_fee_per_gas: tx.max_fee_per_gas.clone(),
             max_priority_fee_per_gas: tx.max_priority_fee_per_gas.clone(),
             gas_used: tx.gas_used,
-            nonce_key: hex_encode(&tx.nonce_key),
             nonce: tx.nonce,
-            fee_token: tx.fee_token.as_ref().map(|v| hex_encode(v)),
-            fee_payer: tx.fee_payer.as_ref().map(|v| hex_encode(v)),
-            calls: tx.calls.as_ref().map(|v| v.to_string()),
-            call_count: tx.call_count,
-            valid_before: tx.valid_before,
-            valid_after: tx.valid_after,
-            signature_type: tx.signature_type,
         }
     }
 }

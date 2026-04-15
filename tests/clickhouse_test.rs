@@ -852,15 +852,7 @@ fn make_tx(block_num: i64, idx: i32) -> TxRow {
         max_fee_per_gas: "100000000000".to_string(),
         max_priority_fee_per_gas: "1000000000".to_string(),
         gas_used: Some(21_000),
-        nonce_key: vec![0x11; 20],
         nonce: block_num,
-        fee_token: None,
-        fee_payer: None,
-        calls: None,
-        call_count: 1,
-        valid_before: None,
-        valid_after: None,
-        signature_type: None,
     }
 }
 
