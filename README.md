@@ -526,7 +526,6 @@ All tables use composite primary keys with timestamps for efficient range querie
 | `cumulative_gas_used` | `INT8` | Cumulative gas in block |
 | `effective_gas_price` | `TEXT` | Actual gas price paid |
 | `status` | `INT2` | Success (1) or failure (0) |
-| `fee_payer` | `BYTEA` | Tempo fee payer (if sponsored) |
 
 ### sync_state
 

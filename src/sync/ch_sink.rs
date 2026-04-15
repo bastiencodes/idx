@@ -458,7 +458,6 @@ struct ChReceiptWire {
     cumulative_gas_used: i64,
     effective_gas_price: Option<String>,
     status: Option<i16>,
-    fee_payer: Option<String>,
 }
 
 impl ChReceiptWire {
@@ -475,7 +474,6 @@ impl ChReceiptWire {
             cumulative_gas_used: r.cumulative_gas_used,
             effective_gas_price: r.effective_gas_price.clone(),
             status: r.status,
-            fee_payer: r.fee_payer.as_ref().map(|v| hex_encode(v)),
         }
     }
 }

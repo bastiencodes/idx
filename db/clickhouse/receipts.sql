@@ -9,8 +9,10 @@ CREATE TABLE IF NOT EXISTS receipts (
     gas_used                Int64,
     cumulative_gas_used     Int64,
     effective_gas_price     Nullable(String),
-    status                  Nullable(Int16),
-    fee_payer               Nullable(String)
+    status                  Nullable(Int16)
 ) ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(block_timestamp)
-ORDER BY (block_num, tx_idx)
+ORDER BY (block_num, tx_idx);
+
+-- Migration: remove legacy Tempo-only column if present.
+ALTER TABLE receipts DROP COLUMN IF EXISTS fee_payer;

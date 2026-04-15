@@ -832,18 +832,6 @@ async fn test_seeded_receipt_stats() {
 
     let conn = db.pool.get().await.expect("Failed to get connection");
 
-    // Check fee_payer distribution (sponsored txs have fee_payer != from)
-    let sponsored: i64 = conn
-        .query_one(
-            r#"SELECT COUNT(*) FROM receipts WHERE fee_payer IS NOT NULL AND fee_payer != "from""#,
-            &[],
-        )
-        .await
-        .expect("Failed to count sponsored txs")
-        .get(0);
-
-    println!("Sponsored txs (fee_payer != from): {sponsored}");
-
     // Check status distribution
     let success: i64 = conn
         .query_one("SELECT COUNT(*) FROM receipts WHERE status = 1", &[])

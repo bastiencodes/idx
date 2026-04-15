@@ -392,7 +392,7 @@ async fn fetch_receipts(conn: &deadpool_postgres::Object, from: i64, to: i64) ->
         .query(
             "SELECT block_num, block_timestamp, tx_idx, tx_hash, \"from\", \"to\", \
              contract_address, gas_used, cumulative_gas_used, effective_gas_price, \
-             status, fee_payer \
+             status \
              FROM receipts WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, tx_idx",
             &[&from, &to],
         )
@@ -412,7 +412,7 @@ async fn fetch_receipts(conn: &deadpool_postgres::Object, from: i64, to: i64) ->
             cumulative_gas_used: r.get(8),
             effective_gas_price: r.get(9),
             status: r.get(10),
-            fee_payer: r.get(11),
+            fee_payer: None,
         })
         .collect())
 }

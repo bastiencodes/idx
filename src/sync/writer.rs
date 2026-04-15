@@ -284,8 +284,7 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
         "CREATE TEMP TABLE _staging_receipts (
             block_num INT8, block_timestamp TIMESTAMPTZ, tx_idx INT4, tx_hash BYTEA,
             \"from\" BYTEA, \"to\" BYTEA, contract_address BYTEA, gas_used INT8,
-            cumulative_gas_used INT8, effective_gas_price TEXT, status INT2,
-            fee_payer BYTEA
+            cumulative_gas_used INT8, effective_gas_price TEXT, status INT2
         ) ON COMMIT DROP",
         &[],
     )
@@ -303,14 +302,13 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
         Type::INT8,        // cumulative_gas_used
         Type::TEXT,        // effective_gas_price
         Type::INT2,        // status
-        Type::BYTEA,       // fee_payer
     ];
 
     let sink = tx
         .copy_in(
             r#"COPY _staging_receipts (block_num, block_timestamp, tx_idx, tx_hash, "from", "to",
                 contract_address, gas_used, cumulative_gas_used, effective_gas_price,
-                status, fee_payer) FROM STDIN BINARY"#,
+                status) FROM STDIN BINARY"#,
         )
         .await?;
 
@@ -332,7 +330,6 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
                 &receipt.cumulative_gas_used,
                 &receipt.effective_gas_price,
                 &receipt.status,
-                &receipt.fee_payer,
             ])
             .await?;
     }
@@ -580,8 +577,7 @@ pub async fn write_batch(
             "CREATE TEMP TABLE _staging_receipts (
                 block_num INT8, block_timestamp TIMESTAMPTZ, tx_idx INT4, tx_hash BYTEA,
                 \"from\" BYTEA, \"to\" BYTEA, contract_address BYTEA, gas_used INT8,
-                cumulative_gas_used INT8, effective_gas_price TEXT, status INT2,
-                fee_payer BYTEA
+                cumulative_gas_used INT8, effective_gas_price TEXT, status INT2
             ) ON COMMIT DROP",
             &[],
         )
@@ -599,14 +595,13 @@ pub async fn write_batch(
             Type::INT8,        // cumulative_gas_used
             Type::TEXT,        // effective_gas_price
             Type::INT2,        // status
-            Type::BYTEA,       // fee_payer
         ];
 
         let sink = tx
             .copy_in(
                 r#"COPY _staging_receipts (block_num, block_timestamp, tx_idx, tx_hash, "from", "to",
                 contract_address, gas_used, cumulative_gas_used, effective_gas_price,
-                status, fee_payer) FROM STDIN BINARY"#,
+                status) FROM STDIN BINARY"#,
             )
             .await?;
 
@@ -628,7 +623,6 @@ pub async fn write_batch(
                     &receipt.cumulative_gas_used,
                     &receipt.effective_gas_price,
                     &receipt.status,
-                    &receipt.fee_payer,
                 ])
                 .await?;
         }
