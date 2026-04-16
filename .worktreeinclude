@@ -1,2 +1,2 @@
-config.sepolia.toml
+config.prod.toml
 .env
