@@ -11,21 +11,28 @@ use crate::service::{execute_query_postgres, QueryOptions};
 const APPROVAL_SIGNATURE: &str =
     "Approval(address indexed owner, address indexed spender, uint256 value)";
 
-/// Current approvals for a given owner: latest value per (contract, spender).
+/// Current approvals for a given owner: latest value per (contract, spender),
+/// excluding revoked approvals (amount = 0).
+///
+/// We must filter zero amounts AFTER taking the latest per group — filtering
+/// before would surface a stale non-zero approval when the user later revoked it.
 ///
 /// Uses DISTINCT ON (address, spender) ORDER BY block_num DESC to get the most
 /// recent Approval event per token+spender pair. PostgreSQL's B-tree index on
 /// (topic1, address, block_num) makes this efficient at P99 volumes (~65 events).
 const CURRENT_APPROVALS_SQL: &str = r#"
-SELECT DISTINCT ON (address, "spender")
-    address        AS contract_address,
-    "owner",
-    "spender",
-    "value"        AS amount,
-    block_timestamp AS updated_at
-FROM Approval
-WHERE "owner" = '{owner}'
-ORDER BY address, "spender", block_num DESC
+SELECT contract_address, "owner", "spender", amount, updated_at FROM (
+    SELECT DISTINCT ON (address, "spender")
+        address        AS contract_address,
+        "owner",
+        "spender",
+        "value"        AS amount,
+        block_timestamp AS updated_at
+    FROM Approval
+    WHERE "owner" = '{owner}'
+    ORDER BY address, "spender", block_num DESC
+) latest
+WHERE amount != 0
 "#;
 
 #[derive(Deserialize)]
