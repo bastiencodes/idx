@@ -175,7 +175,7 @@ fn build_router(state: AppState) -> Router<()> {
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
         .route("/query", get(handle_query))
-        .route("/erc20/tokens", get(erc20::list_tokens))
+        .route("/erc20/tokens", get(erc20::tokens::list_tokens))
         .route("/views", get(views::list_views).post(views::create_view))
         .route("/views/{name}", get(views::get_view).delete(views::delete_view))
         .layer(cors)

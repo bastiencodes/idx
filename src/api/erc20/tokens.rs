@@ -1,7 +1,7 @@
 use axum::{extract::State, Json};
 use serde::Serialize;
 
-use super::{ApiError, AppState};
+use crate::api::{ApiError, AppState};
 use crate::service::QueryOptions;
 
 /// Transfer(address indexed from, address indexed to, uint256 value)
@@ -24,6 +24,7 @@ pub struct Erc20TokensResponse {
     ok: bool,
     tokens: Vec<Erc20Token>,
     count: usize,
+    query_time_ms: Option<f64>,
 }
 
 /// GET /erc20/tokens — list all ERC20 token addresses
@@ -49,6 +50,8 @@ pub async fn list_tokens(
     .await
     .map_err(|e| ApiError::QueryError(e.to_string()))?;
 
+    let query_time_ms = result.query_time_ms;
+
     let tokens: Vec<Erc20Token> = result
         .rows
         .into_iter()
@@ -68,5 +71,6 @@ pub async fn list_tokens(
         ok: true,
         tokens,
         count,
+        query_time_ms,
     }))
 }
