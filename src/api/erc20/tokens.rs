@@ -2,7 +2,6 @@ use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::api::{ApiError, AppState};
-use crate::service::QueryOptions;
 
 /// Transfer(address indexed from, address indexed to, uint256 value)
 const TRANSFER_SIGNATURE: &str =
@@ -31,24 +30,15 @@ pub struct Erc20TokensResponse {
 pub async fn list_tokens(
     State(state): State<AppState>,
 ) -> Result<Json<Erc20TokensResponse>, ApiError> {
-    let pool = state
-        .get_pool(None)
+    let clickhouse = state
+        .get_clickhouse(None)
         .await
-        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+        .ok_or_else(|| ApiError::Internal("ClickHouse not configured for default chain".to_string()))?;
 
-    let options = QueryOptions {
-        timeout_ms: 30_000,
-        limit: crate::query::HARD_LIMIT_MAX,
-    };
-
-    let result = crate::service::execute_query_postgres(
-        &pool,
-        ERC20_TOKENS_SQL,
-        &[TRANSFER_SIGNATURE],
-        &options,
-    )
-    .await
-    .map_err(|e| ApiError::QueryError(e.to_string()))?;
+    let result = clickhouse
+        .query(ERC20_TOKENS_SQL, &[TRANSFER_SIGNATURE])
+        .await
+        .map_err(|e| ApiError::QueryError(e.to_string()))?;
 
     let query_time_ms = result.query_time_ms;
 
