@@ -26,4 +26,4 @@ docker/postgres-pgduckdb/tidx-abi/target/
 _
 
 # Local chain configs
-config.sepolia.toml
+config.prod.toml
