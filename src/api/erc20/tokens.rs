@@ -10,7 +10,7 @@ const TRANSFER_SIGNATURE: &str =
 /// SQL to fetch ERC20 token addresses with their first seen timestamp.
 /// Filters for exactly 3 topics (selector + topic1 + topic2, no topic3)
 /// to exclude ERC721 which indexes the third parameter (tokenId).
-const ERC20_TOKENS_SQL: &str = r#"SELECT address AS contract_address, MIN(block_timestamp) AS created_at FROM Transfer WHERE topic1 IS NOT NULL AND topic2 IS NOT NULL AND topic3 IS NULL GROUP BY address ORDER BY created_at ASC"#;
+const ERC20_TOKENS_SQL: &str = r#"SELECT address AS contract_address, MIN(block_timestamp) AS created_at FROM Transfer WHERE topic1 IS NOT NULL AND topic2 IS NOT NULL AND topic3 IS NULL GROUP BY address ORDER BY created_at ASC LIMIT 10000"#;
 
 #[derive(Serialize)]
 pub struct Erc20Token {
