@@ -338,11 +338,28 @@
           "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
         },
         {
+          "id": 25,
+          "type": "stat",
+          "title": "Total RPC requests/min",
+          "description": "Total RPC throughput across all methods and chains, averaged over 5m and scaled to per-minute.",
+          "gridPos": { "x": 0, "y": 23, "w": 8, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum(rate(tidx_rpc_requests_total[5m])) * 60", "legendFormat": "req/min", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } }
+        },
+        {
           "id": 15,
           "type": "stat",
           "title": "RPC success rate (5m)",
           "description": "rate(success=true) / rate(total). Red below 95%.",
-          "gridPos": { "x": 0, "y": 23, "w": 8, "h": 4 },
+          "gridPos": { "x": 8, "y": 23, "w": 8, "h": 4 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "targets": [
             { "expr": "sum(rate(tidx_rpc_requests_total{success=\"true\"}[5m])) / clamp_min(sum(rate(tidx_rpc_requests_total[5m])), 1e-9)", "legendFormat": "success", "refId": "A" }
@@ -373,7 +390,7 @@
           "type": "timeseries",
           "title": "RPC errors (rate)",
           "description": "Failed RPC requests per second by method. Bursts usually correlate with provider-side incidents.",
-          "gridPos": { "x": 8, "y": 23, "w": 16, "h": 4 },
+          "gridPos": { "x": 16, "y": 23, "w": 8, "h": 4 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "targets": [
             { "expr": "sum by (method) (rate(tidx_rpc_requests_total{success=\"false\"}[5m]))", "legendFormat": "{{method}}", "refId": "A" }
