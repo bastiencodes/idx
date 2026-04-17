@@ -271,10 +271,16 @@ async fn print_json_status(config: &Config) -> Result<()> {
             .collect();
         let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
 
+        // rpc_url may contain credentials (basic-auth or API key in path), so
+        // surface only the host in JSON output.
+        let rpc_host = url::Url::parse(&chain.rpc_url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from));
+
         let mut chain_status = serde_json::json!({
             "name": chain.name,
             "chain_id": chain.chain_id,
-            "rpc_url": chain.rpc_url,
+            "rpc_host": rpc_host,
             "pg_url": chain.pg_url,
             "head": live_head,
             "tip_num": state.as_ref().map(|s| s.tip_num),
