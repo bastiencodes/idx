@@ -273,10 +273,16 @@ fn spawn_sync_engine(
         }
     };
 
+    // Log only the RPC host to avoid leaking basic-auth / API-key-in-path.
+    let rpc_host = url::Url::parse(&rpc_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "<unparseable>".to_string());
+
     info!(
         chain = %chain.name,
         chain_id = chain.chain_id,
-        rpc = %chain.rpc_url,
+        rpc_host = %rpc_host,
         backfill_limit = throttled_pool.backfill_semaphore.available_permits(),
         "Starting sync for chain (throttled pool: 16 connections, backfill limited)"
     );

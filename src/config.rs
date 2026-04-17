@@ -94,16 +94,18 @@ pub struct ChainConfig {
     /// Chain ID
     pub chain_id: u64,
 
-    /// RPC URL. If `rpc_password_env` is set, the password portion of this URL
-    /// is replaced with the value from that environment variable at startup.
-    pub rpc_url: String,
-
-    /// Environment variable name containing the RPC basic-auth password.
-    /// When set, the password portion of `rpc_url` is replaced with this value.
-    /// Use a placeholder (e.g. `https://user:x@host`) in `rpc_url` so the secret
-    /// never lives in the config file.
+    /// RPC URL. Optional when `rpc_url_env` is set (env var takes precedence).
+    /// Leave unset to keep the full URL out of the config file entirely.
     #[serde(default)]
-    pub rpc_password_env: Option<String>,
+    pub rpc_url: Option<String>,
+
+    /// Environment variable name containing the full RPC URL for this chain.
+    /// When set, the URL is read from this env var at startup; `rpc_url` is
+    /// ignored. Use this to keep credentials (basic-auth or API-key-in-path)
+    /// out of the config file. Exactly one of `rpc_url` / `rpc_url_env` must
+    /// resolve to a non-empty value.
+    #[serde(default)]
+    pub rpc_url_env: Option<String>,
 
     /// Database connection URL for this chain.
     /// If `pg_password_env` is set, the password in this URL will be replaced
@@ -233,24 +235,26 @@ fn default_backfill() -> bool {
 }
 
 impl ChainConfig {
-    /// Returns the RPC URL with password resolved from environment if configured.
-    /// If `rpc_password_env` is set, replaces the password in `rpc_url` with the env var value.
+    /// Returns the RPC URL, preferring `rpc_url_env` over `rpc_url`.
+    /// Errors if `rpc_url_env` is set but the variable is missing/empty, or
+    /// if neither `rpc_url_env` nor `rpc_url` provides a value.
     pub fn resolved_rpc_url(&self) -> Result<String> {
-        match &self.rpc_password_env {
-            Some(env_var) => {
-                let password = std::env::var(env_var).with_context(|| {
-                    format!("rpc_password_env '{env_var}' is set but environment variable not found")
-                })?;
-
-                let mut url = url::Url::parse(&self.rpc_url)
-                    .with_context(|| format!("Invalid rpc_url: {}", self.rpc_url))?;
-
-                url.set_password(Some(&password))
-                    .map_err(|()| anyhow::anyhow!("Failed to set password in rpc_url (URL must have a username)"))?;
-
-                Ok(url.to_string())
+        if let Some(env_var) = &self.rpc_url_env {
+            let value = std::env::var(env_var).with_context(|| {
+                format!("rpc_url_env '{env_var}' is set but environment variable not found")
+            })?;
+            if value.is_empty() {
+                anyhow::bail!("rpc_url_env '{env_var}' is set but environment variable is empty");
             }
-            None => Ok(self.rpc_url.clone()),
+            return Ok(value);
+        }
+
+        match &self.rpc_url {
+            Some(url) if !url.is_empty() => Ok(url.clone()),
+            _ => anyhow::bail!(
+                "chain '{}' has no rpc_url (set either `rpc_url` or `rpc_url_env`)",
+                self.name
+            ),
         }
     }
 
@@ -429,8 +433,8 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: "http://localhost:8545".to_string(),
-            rpc_password_env: None,
+            rpc_url: Some("http://localhost:8545".to_string()),
+            rpc_url_env: None,
             pg_url: "postgres://user:pass@localhost/db".to_string(),
             pg_password_env: None,
             backfill: true,
@@ -455,8 +459,8 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: "http://localhost:8545".to_string(),
-            rpc_password_env: None,
+            rpc_url: Some("http://localhost:8545".to_string()),
+            rpc_url_env: None,
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("PATH".to_string()),
             backfill: true,
@@ -475,13 +479,12 @@ mod tests {
         assert!(!resolved.contains("placeholder"));
     }
 
-    #[test]
-    fn test_resolved_rpc_url_without_env() {
-        let config = ChainConfig {
+    fn rpc_test_chain(rpc_url: Option<&str>, rpc_url_env: Option<&str>) -> ChainConfig {
+        ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: "https://eng:pass@rpc.example.com".to_string(),
-            rpc_password_env: None,
+            rpc_url: rpc_url.map(String::from),
+            rpc_url_env: rpc_url_env.map(String::from),
             pg_url: "postgres://localhost/db".to_string(),
             pg_password_env: None,
             backfill: true,
@@ -492,9 +495,12 @@ mod tests {
             api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
-        };
+        }
+    }
 
-        // Without env var, the URL is returned verbatim (no normalization).
+    #[test]
+    fn test_resolved_rpc_url_inline() {
+        let config = rpc_test_chain(Some("https://eng:pass@rpc.example.com"), None);
         assert_eq!(
             config.resolved_rpc_url().unwrap(),
             "https://eng:pass@rpc.example.com"
@@ -502,51 +508,32 @@ mod tests {
     }
 
     #[test]
-    fn test_resolved_rpc_url_with_env() {
-        // PATH is always set, use it to test env var substitution
-        let config = ChainConfig {
-            name: "test".to_string(),
-            chain_id: 1,
-            rpc_url: "https://eng:placeholder@rpc.example.com".to_string(),
-            rpc_password_env: Some("PATH".to_string()),
-            pg_url: "postgres://localhost/db".to_string(),
-            pg_password_env: None,
-            backfill: true,
-            batch_size: 100,
-            concurrency: 4,
-            backfill_first: false,
-            trust_rpc: false,
-            api_pg_url: None,
-            api_pg_password_env: None,
-            clickhouse: None,
-        };
-
+    fn test_resolved_rpc_url_from_env() {
+        // PATH is always set, use it to test env-var sourcing
+        let config = rpc_test_chain(None, Some("PATH"));
         let resolved = config.resolved_rpc_url().unwrap();
-        assert!(resolved.starts_with("https://eng:"));
-        assert!(resolved.contains("@rpc.example.com"));
-        assert!(!resolved.contains("placeholder"));
+        assert_eq!(resolved, std::env::var("PATH").unwrap());
+    }
+
+    #[test]
+    fn test_resolved_rpc_url_env_takes_precedence() {
+        // When both are set, env var wins.
+        let config = rpc_test_chain(Some("https://inline.example.com"), Some("PATH"));
+        let resolved = config.resolved_rpc_url().unwrap();
+        assert_eq!(resolved, std::env::var("PATH").unwrap());
     }
 
     #[test]
     fn test_resolved_rpc_url_missing_env() {
-        let config = ChainConfig {
-            name: "test".to_string(),
-            chain_id: 1,
-            rpc_url: "https://eng:placeholder@rpc.example.com".to_string(),
-            rpc_password_env: Some("NONEXISTENT_VAR_XYZ_999".to_string()),
-            pg_url: "postgres://localhost/db".to_string(),
-            pg_password_env: None,
-            backfill: true,
-            batch_size: 100,
-            concurrency: 4,
-            backfill_first: false,
-            trust_rpc: false,
-            api_pg_url: None,
-            api_pg_password_env: None,
-            clickhouse: None,
-        };
-
+        let config = rpc_test_chain(None, Some("NONEXISTENT_VAR_XYZ_999"));
         assert!(config.resolved_rpc_url().is_err());
+    }
+
+    #[test]
+    fn test_resolved_rpc_url_neither_set() {
+        let config = rpc_test_chain(None, None);
+        let err = config.resolved_rpc_url().unwrap_err().to_string();
+        assert!(err.contains("no rpc_url"), "got: {err}");
     }
 
     #[test]
@@ -554,8 +541,8 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: "http://localhost:8545".to_string(),
-            rpc_password_env: None,
+            rpc_url: Some("http://localhost:8545".to_string()),
+            rpc_url_env: None,
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("NONEXISTENT_VAR_XYZ_999".to_string()),
             backfill: true,
