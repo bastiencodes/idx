@@ -6,6 +6,11 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    # Deterministic UID so dashboards can reference this data source by a
+    # stable identifier. Without this, Grafana auto-generates a UID (like
+    # PBFA97CFB590B2093) which breaks dashboards whose panels hardcode a
+    # specific value — they'd silently return "No data".
+    uid: prometheus
     type: prometheus
     access: proxy
     # Resolves via the compose network — `prometheus` is the service name in
