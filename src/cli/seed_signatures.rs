@@ -1,7 +1,5 @@
 //! Seed the per-chain `signatures` cache from Sourcify's Parquet export.
-//!
-//! Dataset: <https://docs.sourcify.dev/docs/repository/download-dataset/>
-//! Bucket:  `s3://sourcify-production-parquet-export/v2/signatures/`
+//! <https://docs.sourcify.dev/docs/repository/download-dataset/>
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -29,11 +27,6 @@ pub struct Args {
     /// Limit to one chain by chain_id. Default: seed every chain in the config.
     #[arg(long)]
     pub chain_id: Option<u64>,
-
-    /// Skip the parquet download + CSV conversion; reuse the staged CSV
-    /// from a prior run. Useful when iterating across chains.
-    #[arg(long)]
-    pub skip_prepare: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -74,16 +67,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     let csv_path = PathBuf::from(STAGE_CSV);
 
-    if args.skip_prepare {
-        anyhow::ensure!(
-            csv_path.exists(),
-            "--skip-prepare given but {} not found",
-            csv_path.display()
-        );
-    } else {
-        sync_parquet().await?;
-        convert_to_csv(&csv_path).await?;
-    }
+    sync_parquet().await?;
+    convert_to_csv(&csv_path).await?;
 
     for chain in &chains {
         info!(chain = %chain.name, chain_id = chain.chain_id, "Seeding signatures");
