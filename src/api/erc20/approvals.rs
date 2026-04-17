@@ -39,6 +39,8 @@ WHERE amount != 0
 pub struct ApprovalsParams {
     /// Owner address to query (required), e.g. 0xabc...
     owner: String,
+    #[serde(alias = "chain_id", rename = "chainId")]
+    chain_id: u64,
 }
 
 #[derive(Serialize)]
@@ -70,9 +72,9 @@ pub async fn list_approvals(
     let owner = validate_address(&params.owner)?;
 
     let pool = state
-        .get_pool(None)
+        .get_pool(Some(params.chain_id))
         .await
-        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+        .ok_or_else(|| ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id)))?;
 
     let sql = CURRENT_APPROVALS_SQL.replace("{owner}", &owner);
     // Default 5s is too tight for outlier addresses with millions of approvals

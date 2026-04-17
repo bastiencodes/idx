@@ -19,7 +19,7 @@
 //!                                                 (`event: result` / `lagged`
 //!                                                 / `error`). Not compatible
 //!                                                 with `block=` or `address=`.
-//! `GET /transactions/:hash`                     — single transaction by
+//! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
 
@@ -467,17 +467,24 @@ pub struct TransactionResponse {
     query_time_ms: f64,
 }
 
-/// `GET /transactions/:hash` — `hash` is a `0x`-prefixed 32-byte transaction hash.
+#[derive(Deserialize)]
+pub struct TransactionDetailParams {
+    #[serde(alias = "chain_id", rename = "chainId")]
+    chain_id: u64,
+}
+
+/// `GET /transactions/:hash?chainId=X` — `hash` is a `0x`-prefixed 32-byte transaction hash.
 pub async fn get_transaction(
     State(state): State<AppState>,
     Path(hash): Path<String>,
+    Query(params): Query<TransactionDetailParams>,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let hash_bytes = parse_tx_hash(&hash)?;
 
     let pool = state
-        .get_pool(None)
+        .get_pool(Some(params.chain_id))
         .await
-        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+        .ok_or_else(|| ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id)))?;
 
     let conn = pool
         .get()
