@@ -6,7 +6,7 @@
 //!                                            event per newly indexed block. Mirrors
 //!                                            the `/query?live=true` framing
 //!                                            (`event: result` / `lagged` / `error`).
-//! `GET /blocks/:identifier`                — single block by decimal number or
+//! `GET /blocks/:identifier?chainId=X`      — single block by decimal number or
 //!                                            0x-prefixed 32-byte hash.
 
 use std::convert::Infallible;
@@ -249,18 +249,25 @@ pub struct BlockResponse {
     query_time_ms: f64,
 }
 
-/// `GET /blocks/:identifier` — `identifier` is a decimal block number or a
+#[derive(Deserialize)]
+pub struct BlockDetailParams {
+    #[serde(alias = "chain_id", rename = "chainId")]
+    chain_id: u64,
+}
+
+/// `GET /blocks/:identifier?chainId=X` — `identifier` is a decimal block number or a
 /// `0x`-prefixed 32-byte block hash.
 pub async fn get_block(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
+    Query(params): Query<BlockDetailParams>,
 ) -> Result<Json<BlockResponse>, ApiError> {
     let lookup = parse_identifier(&identifier)?;
 
     let pool = state
-        .get_pool(None)
+        .get_pool(Some(params.chain_id))
         .await
-        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+        .ok_or_else(|| ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id)))?;
 
     let conn = pool
         .get()

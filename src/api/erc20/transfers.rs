@@ -17,6 +17,8 @@ pub struct TransferParams {
     /// Filter direction: "in", "out", or omit for both
     #[serde(default)]
     direction: Option<String>,
+    #[serde(alias = "chain_id", rename = "chainId")]
+    chain_id: u64,
 }
 
 #[derive(Serialize)]
@@ -59,8 +61,8 @@ pub async fn list_transfers(
     }
     let padded = format!("000000000000000000000000{}", addr_hex.to_lowercase());
 
-    let pool = state.get_pool(None).await.ok_or_else(|| {
-        ApiError::BadRequest("No chain configured".to_string())
+    let pool = state.get_pool(Some(params.chain_id)).await.ok_or_else(|| {
+        ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id))
     })?;
 
     // Build address filter based on direction
