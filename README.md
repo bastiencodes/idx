@@ -453,6 +453,16 @@ Views are auto-prefixed with `analytics_{chainId}` when using `engine=clickhouse
 curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
 ```
 
+## ERC20 Metadata
+
+The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
+
+- **Discovery (sync-time, atomic)** — the sync writer upserts new addresses as `pending` in the same transaction as the `logs` write, filtered to ERC20 Transfers (topic1 + topic2, no topic3). `deployed_*` fields populate via a LEFT JOIN against `receipts` where available (null for factory-deployed tokens).
+- **Resolution (worker, every 60s)** — drains the pending queue with back-to-back Multicall3 `aggregate3` calls of up to 500 tokens each. Each call bundles `getBlockNumber()`, `getCurrentBlockTimestamp()`, and `name()`/`symbol()`/`decimals()` per token, so the block anchor is atomic with the metadata reads.
+- **Robustness** — `allowFailure: true` on every sub-call, plus a bytes32 fallback for legacy tokens (MKR/SAI).
+
+A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
+
 ## Schemas
 
 All tables use composite primary keys with timestamps for efficient range queries:
