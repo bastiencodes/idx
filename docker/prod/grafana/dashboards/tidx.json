@@ -300,21 +300,19 @@
         {
           "id": 13,
           "type": "timeseries",
-          "title": "RPC request rate by method",
+          "title": "RPC requests/min over time",
+          "description": "Total RPC throughput across all methods and chains over the dashboard window. Per-method breakdown is available in the errors and latency panels.",
           "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "targets": [
-            { "expr": "sum by (method) (rate(tidx_rpc_requests_total[5m]))", "legendFormat": "{{method}}", "refId": "A" }
+            { "expr": "sum(rate(tidx_rpc_requests_total[5m])) * 60", "legendFormat": "total", "refId": "A" },
+            { "expr": "sum by (method) (rate(tidx_rpc_requests_total[5m])) * 60", "legendFormat": "{{method}}", "refId": "B", "hide": true }
           ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "fillOpacity": 20,
-                "stacking": { "mode": "normal", "group": "A" }
-              }
+              "decimals": 0,
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
             }
           },
           "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
