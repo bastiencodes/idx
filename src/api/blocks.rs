@@ -1,4 +1,4 @@
-//! Latest-blocks endpoint.
+//! Blocks endpoints.
 //!
 //! `GET /blocks?chainId=X`                  — newest [`LIST_LIMIT`] blocks from the
 //!                                            `blocks` table.
@@ -6,18 +6,21 @@
 //!                                            event per newly indexed block. Mirrors
 //!                                            the `/query?live=true` framing
 //!                                            (`event: result` / `lagged` / `error`).
+//! `GET /blocks/:identifier`                — single block by decimal number or
+//!                                            0x-prefixed 32-byte hash.
 
 use std::convert::Infallible;
 use std::time::Instant;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     response::{
         sse::{Event as SseEvent, KeepAlive, KeepAliveStream},
         IntoResponse, Response, Sse,
     },
     Json,
 };
+use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
@@ -215,4 +218,204 @@ async fn handle_live(
 
     let stream: SseStream = Box::pin(stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ---------------------------------------------------------------------------
+// Single-block detail endpoint: GET /blocks/:identifier
+//
+// Axum can't register `/blocks/:hash` and `/blocks/:number` as separate routes
+// (both match any path segment), so we take one free-form `{identifier}` and
+// branch on its shape: 0x-prefixed 64-hex → hash lookup, otherwise decimal →
+// number lookup.
+
+#[derive(Serialize)]
+pub struct BlockDetail {
+    number: i64,
+    hash: String,
+    parent_hash: String,
+    timestamp: String,
+    timestamp_ms: i64,
+    gas_limit: i64,
+    gas_used: i64,
+    miner: String,
+    extra_data: Option<String>,
+    tx_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct BlockResponse {
+    ok: bool,
+    block: BlockDetail,
+    query_time_ms: f64,
+}
+
+/// `GET /blocks/:identifier` — `identifier` is a decimal block number or a
+/// `0x`-prefixed 32-byte block hash.
+pub async fn get_block(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<BlockResponse>, ApiError> {
+    let lookup = parse_identifier(&identifier)?;
+
+    let pool = state
+        .get_pool(None)
+        .await
+        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+
+    let conn = pool
+        .get()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
+
+    let start = Instant::now();
+
+    const SELECT_COLS: &str = "num, hash, parent_hash, timestamp, timestamp_ms, \
+                               gas_limit, gas_used, miner, extra_data";
+
+    let row_opt = match &lookup {
+        BlockLookup::Number(n) => {
+            conn.query_opt(
+                &format!("SELECT {SELECT_COLS} FROM blocks WHERE num = $1"),
+                &[n],
+            )
+            .await
+        }
+        BlockLookup::Hash(h) => {
+            conn.query_opt(
+                &format!("SELECT {SELECT_COLS} FROM blocks WHERE hash = $1"),
+                &[h],
+            )
+            .await
+        }
+    }
+    .map_err(|e| ApiError::QueryError(e.to_string()))?;
+
+    let row = row_opt
+        .ok_or_else(|| ApiError::NotFound(format!("Block not found: {identifier}")))?;
+
+    let num: i64 = row.get(0);
+    let hash: Vec<u8> = row.get(1);
+    let parent_hash: Vec<u8> = row.get(2);
+    let timestamp: DateTime<Utc> = row.get(3);
+    let timestamp_ms: i64 = row.get(4);
+    let gas_limit: i64 = row.get(5);
+    let gas_used: i64 = row.get(6);
+    let miner: Vec<u8> = row.get(7);
+    let extra_data: Option<Vec<u8>> = row.get(8);
+
+    let tx_count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM txs WHERE block_num = $1", &[&num])
+        .await
+        .map_err(|e| ApiError::QueryError(e.to_string()))?
+        .get(0);
+
+    let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(Json(BlockResponse {
+        ok: true,
+        block: BlockDetail {
+            number: num,
+            hash: hex_prefixed(&hash),
+            parent_hash: hex_prefixed(&parent_hash),
+            timestamp: timestamp.to_rfc3339(),
+            timestamp_ms,
+            gas_limit,
+            gas_used,
+            miner: hex_prefixed(&miner),
+            extra_data: extra_data.as_deref().map(hex_prefixed),
+            tx_count,
+        },
+        query_time_ms,
+    }))
+}
+
+enum BlockLookup {
+    Number(i64),
+    Hash(Vec<u8>),
+}
+
+fn parse_identifier(id: &str) -> Result<BlockLookup, ApiError> {
+    if let Some(hex) = id.strip_prefix("0x").or_else(|| id.strip_prefix("0X")) {
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::BadRequest(
+                "Block hash must be 0x + 64 hex characters".to_string(),
+            ));
+        }
+        let bytes = hex::decode(hex)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid hex in block hash: {e}")))?;
+        return Ok(BlockLookup::Hash(bytes));
+    }
+
+    let n: i64 = id.parse().map_err(|_| {
+        ApiError::BadRequest(format!(
+            "Block identifier must be a non-negative block number or a 0x-prefixed 32-byte hash: {id}"
+        ))
+    })?;
+
+    if n < 0 {
+        return Err(ApiError::BadRequest(
+            "Block number must be non-negative".to_string(),
+        ));
+    }
+
+    Ok(BlockLookup::Number(n))
+}
+
+fn hex_prefixed(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_identifier_number() {
+        match parse_identifier("12345").unwrap() {
+            BlockLookup::Number(n) => assert_eq!(n, 12345),
+            _ => panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn parse_identifier_zero() {
+        match parse_identifier("0").unwrap() {
+            BlockLookup::Number(n) => assert_eq!(n, 0),
+            _ => panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn parse_identifier_hash_lower() {
+        let hash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        match parse_identifier(hash).unwrap() {
+            BlockLookup::Hash(bytes) => assert_eq!(bytes.len(), 32),
+            _ => panic!("expected hash"),
+        }
+    }
+
+    #[test]
+    fn parse_identifier_hash_mixed_case() {
+        let hash = "0xABCDef1234567890ABCDef1234567890ABCDef1234567890ABCDef1234567890";
+        assert!(matches!(
+            parse_identifier(hash).unwrap(),
+            BlockLookup::Hash(_)
+        ));
+    }
+
+    #[test]
+    fn parse_identifier_rejects_short_hash() {
+        assert!(parse_identifier("0xdeadbeef").is_err());
+    }
+
+    #[test]
+    fn parse_identifier_rejects_negative() {
+        assert!(parse_identifier("-1").is_err());
+    }
+
+    #[test]
+    fn parse_identifier_rejects_garbage() {
+        assert!(parse_identifier("latest").is_err());
+        assert!(parse_identifier("0xzzzz").is_err());
+    }
 }
