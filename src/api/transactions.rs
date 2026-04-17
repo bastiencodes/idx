@@ -1,4 +1,4 @@
-//! Latest-transactions endpoint.
+//! Transactions endpoints.
 //!
 //! `GET /transactions?chainId=X`                 — newest [`LIST_LIMIT`]
 //!                                                 transactions joined with
@@ -11,18 +11,22 @@
 //!                                                 `/blocks?live=true` framing
 //!                                                 (`event: result` / `lagged`
 //!                                                 / `error`).
+//! `GET /transactions/:hash`                     — single transaction by
+//!                                                 0x-prefixed 32-byte hash,
+//!                                                 joined with its receipt.
 
 use std::convert::Infallible;
 use std::time::Instant;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     response::{
         sse::{Event as SseEvent, KeepAlive, KeepAliveStream},
         IntoResponse, Response, Sse,
     },
     Json,
 };
+use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
@@ -320,4 +324,240 @@ async fn handle_live(
 
     let stream: SseStream = Box::pin(stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ---------------------------------------------------------------------------
+// Single-transaction detail endpoint: GET /transactions/:hash
+
+#[derive(Serialize)]
+pub struct TransactionDetail {
+    hash: String,
+    block_number: i64,
+    /// RFC3339 timestamp.
+    block_timestamp: String,
+    /// Unix seconds.
+    block_timestamp_unix: i64,
+    transaction_index: i32,
+    from: String,
+    to: Option<String>,
+    value: String,
+    nonce: i64,
+    tx_type: i16,
+    input: String,
+    gas_limit: i64,
+    max_fee_per_gas: String,
+    max_priority_fee_per_gas: String,
+    gas_used: Option<i64>,
+    cumulative_gas_used: Option<i64>,
+    effective_gas_price: Option<String>,
+    status: Option<i16>,
+    contract_address: Option<String>,
+    logs: Vec<TransactionLog>,
+}
+
+#[derive(Serialize)]
+pub struct TransactionLog {
+    log_index: i32,
+    address: String,
+    topics: Vec<String>,
+    data: String,
+}
+
+#[derive(Serialize)]
+pub struct TransactionResponse {
+    ok: bool,
+    transaction: TransactionDetail,
+    query_time_ms: f64,
+}
+
+/// `GET /transactions/:hash` — `hash` is a `0x`-prefixed 32-byte transaction hash.
+pub async fn get_transaction(
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Json<TransactionResponse>, ApiError> {
+    let hash_bytes = parse_tx_hash(&hash)?;
+
+    let pool = state
+        .get_pool(None)
+        .await
+        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+
+    let conn = pool
+        .get()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
+
+    let start = Instant::now();
+    let row_opt = conn
+        .query_opt(DETAIL_SQL, &[&hash_bytes])
+        .await
+        .map_err(|e| ApiError::QueryError(e.to_string()))?;
+
+    let row = row_opt
+        .ok_or_else(|| ApiError::NotFound(format!("Transaction not found: {hash}")))?;
+
+    let hash_col: Vec<u8> = row.get(0);
+    let block_timestamp: DateTime<Utc> = row.get(2);
+    let from_col: Vec<u8> = row.get(4);
+    let to_col: Option<Vec<u8>> = row.get(5);
+    let input_col: Vec<u8> = row.get(9);
+    let contract_address: Option<Vec<u8>> = row.get(16);
+
+    let log_rows = conn
+        .query(LOGS_SQL, &[&hash_bytes])
+        .await
+        .map_err(|e| ApiError::QueryError(e.to_string()))?;
+    let logs: Vec<TransactionLog> = log_rows.iter().map(row_to_log).collect();
+
+    let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(Json(TransactionResponse {
+        ok: true,
+        transaction: TransactionDetail {
+            hash: hex_prefixed(&hash_col),
+            block_number: row.get(1),
+            block_timestamp: block_timestamp.to_rfc3339(),
+            block_timestamp_unix: block_timestamp.timestamp(),
+            transaction_index: row.get(3),
+            from: hex_prefixed(&from_col),
+            to: to_col.as_deref().map(hex_prefixed),
+            value: row.get(6),
+            nonce: row.get(7),
+            tx_type: row.get(8),
+            input: hex_prefixed(&input_col),
+            gas_limit: row.get(10),
+            max_fee_per_gas: row.get(11),
+            max_priority_fee_per_gas: row.get(12),
+            gas_used: row.get(13),
+            cumulative_gas_used: row.get(14),
+            effective_gas_price: row.get(15),
+            status: row.get(17),
+            contract_address: contract_address.as_deref().map(hex_prefixed),
+            logs,
+        },
+        query_time_ms,
+    }))
+}
+
+fn row_to_log(row: &tokio_postgres::Row) -> TransactionLog {
+    let address: Vec<u8> = row.get(1);
+    let topic0: Option<Vec<u8>> = row.get(2);
+    let topic1: Option<Vec<u8>> = row.get(3);
+    let topic2: Option<Vec<u8>> = row.get(4);
+    let topic3: Option<Vec<u8>> = row.get(5);
+    let data: Vec<u8> = row.get(6);
+
+    let topics = [topic0, topic1, topic2, topic3]
+        .into_iter()
+        .flatten()
+        .map(|b| hex_prefixed(&b))
+        .collect();
+
+    TransactionLog {
+        log_index: row.get(0),
+        address: hex_prefixed(&address),
+        topics,
+        data: hex_prefixed(&data),
+    }
+}
+
+const DETAIL_SQL: &str = r#"
+    SELECT
+        t.hash,
+        t.block_num,
+        t.block_timestamp,
+        t.idx,
+        t."from",
+        t."to",
+        t.value,
+        t.nonce,
+        t.type,
+        t.input,
+        t.gas_limit,
+        t.max_fee_per_gas,
+        t.max_priority_fee_per_gas,
+        r.gas_used,
+        r.cumulative_gas_used,
+        r.effective_gas_price,
+        r.contract_address,
+        r.status
+    FROM txs t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    WHERE t.hash = $1
+    LIMIT 1
+"#;
+
+const LOGS_SQL: &str = r#"
+    SELECT
+        log_idx,
+        address,
+        topic0,
+        topic1,
+        topic2,
+        topic3,
+        data
+    FROM logs
+    WHERE tx_hash = $1
+    ORDER BY log_idx ASC
+"#;
+
+fn parse_tx_hash(id: &str) -> Result<Vec<u8>, ApiError> {
+    let hex = id
+        .strip_prefix("0x")
+        .or_else(|| id.strip_prefix("0X"))
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "Transaction hash must be 0x-prefixed 32-byte hex".to_string(),
+            )
+        })?;
+
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "Transaction hash must be 0x + 64 hex characters".to_string(),
+        ));
+    }
+
+    hex::decode(hex)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid hex in transaction hash: {e}")))
+}
+
+fn hex_prefixed(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tx_hash_lower() {
+        let h = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let bytes = parse_tx_hash(h).unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn parse_tx_hash_mixed_case() {
+        let h = "0xABCDef1234567890ABCDef1234567890ABCDef1234567890ABCDef1234567890";
+        assert!(parse_tx_hash(h).is_ok());
+    }
+
+    #[test]
+    fn parse_tx_hash_rejects_missing_prefix() {
+        let h = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        assert!(parse_tx_hash(h).is_err());
+    }
+
+    #[test]
+    fn parse_tx_hash_rejects_short() {
+        assert!(parse_tx_hash("0xdeadbeef").is_err());
+    }
+
+    #[test]
+    fn parse_tx_hash_rejects_garbage() {
+        assert!(parse_tx_hash("0xzzzz").is_err());
+        assert!(parse_tx_hash("latest").is_err());
+    }
 }
