@@ -1,0 +1,31 @@
+# Provisions the Prometheus instance from the docker/prod compose stack as the
+# default Grafana data source on first boot. See:
+# https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources
+
+apiVersion: 1
+
+# Drop any pre-existing data source with this name before provisioning the
+# new one. Handles the case where Grafana already has a Prometheus data
+# source with an auto-generated UID from an earlier provisioning pass —
+# the provisioner can't update the UID in place, so we delete then recreate.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    # Deterministic UID so dashboards can reference this data source by a
+    # stable identifier. Without this, Grafana auto-generates a UID (like
+    # PBFA97CFB590B2093) which breaks dashboards whose panels hardcode a
+    # specific value — they'd silently return "No data".
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Resolves via the compose network — `prometheus` is the service name in
+    # docker/prod/docker-compose.yml. The container port is 9090 (the host
+    # port mapping is 9091 but that's host-side only).
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 15s
