@@ -6,7 +6,67 @@ use tokio_postgres::types::Type;
 
 use crate::db::Pool;
 use crate::metrics;
+use crate::query::EventSignature;
 use crate::types::{BlockRow, LogRow, ReceiptRow, SyncState, TxRow};
+
+/// ERC20 Transfer event signature — same string the erc20_metadata worker
+/// uses for resolution. topic0 is derived at use via `EventSignature::parse`
+/// (matches the codebase-canonical pattern in approvals.rs / service layer).
+const ERC20_TRANSFER_SIGNATURE: &str =
+    "Transfer(address indexed from, address indexed to, uint256 value)";
+
+/// Upsert any new ERC20 token addresses discovered in `_staging_logs` into
+/// `erc20_tokens`. Runs inside the caller's transaction so presence is atomic
+/// with the log write — by the time logs are committed, erc20_tokens has a
+/// row for every distinct Transfer address in the batch.
+///
+/// - Filters for ERC20 Transfers (selector match + topic1 + topic2, no topic3)
+///   to exclude ERC721 which indexes a third `tokenId` topic.
+/// - LEFT JOINs the committed `receipts` table to opportunistically populate
+///   `deployed_*` for contracts whose creation tx is already indexed.
+/// - `ON CONFLICT DO UPDATE ... WHERE earlier` ensures backfill going
+///   backwards can improve the `first_transfer_*` fields if a lower block
+///   for the same address shows up later.
+/// - `resolution_status` is always set to `'pending'` on insert and is
+///   never overwritten by subsequent upserts (the worker owns that column).
+async fn upsert_erc20_tokens_from_staging_logs(
+    tx: &deadpool_postgres::Transaction<'_>,
+) -> Result<()> {
+    let selector = EventSignature::parse(ERC20_TRANSFER_SIGNATURE)
+        .expect("ERC20_TRANSFER_SIGNATURE is a valid event signature")
+        .topic0;
+    let selector_bytes = selector.to_vec();
+
+    tx.execute(
+        r#"
+        INSERT INTO erc20_tokens (
+            address, first_transfer_block, first_transfer_tx_hash, first_transfer_at,
+            deployed_block, deployed_tx_hash, deployed_at,
+            resolution_status
+        )
+        SELECT DISTINCT ON (l.address)
+            l.address, l.block_num, l.tx_hash, l.block_timestamp,
+            r.block_num, r.tx_hash, r.block_timestamp,
+            'pending'
+        FROM _staging_logs l
+        LEFT JOIN receipts r ON r.contract_address = l.address
+        WHERE l.selector = $1
+          AND l.topic1 IS NOT NULL
+          AND l.topic2 IS NOT NULL
+          AND l.topic3 IS NULL
+        ORDER BY l.address, l.block_num, l.log_idx
+        ON CONFLICT (address) DO UPDATE SET
+            first_transfer_block   = EXCLUDED.first_transfer_block,
+            first_transfer_tx_hash = EXCLUDED.first_transfer_tx_hash,
+            first_transfer_at      = EXCLUDED.first_transfer_at
+        WHERE EXCLUDED.first_transfer_block < erc20_tokens.first_transfer_block
+        "#,
+        &[&selector_bytes],
+    )
+    .await?;
+
+    Ok(())
+}
 
 pub async fn write_block(pool: &Pool, block: &BlockRow) -> Result<()> {
     write_blocks(pool, std::slice::from_ref(block)).await
@@ -240,6 +300,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
     pinned_writer.as_mut().finish().await?;
 
     tx.execute("INSERT INTO logs SELECT * FROM _staging_logs ON CONFLICT DO NOTHING", &[]).await?;
+    upsert_erc20_tokens_from_staging_logs(&tx).await?;
     tx.commit().await?;
 
     metrics::record_sink_write_duration("postgres", "logs", start.elapsed());
@@ -592,6 +653,14 @@ pub async fn write_batch(
         pinned_writer.as_mut().finish().await?;
 
         tx.execute("INSERT INTO receipts SELECT * FROM _staging_receipts ON CONFLICT DO NOTHING", &[]).await?;
+    }
+
+    // ── erc20_tokens upsert ──────────────────────────────────────────────
+    // Runs after logs AND receipts so the LEFT JOIN against receipts sees
+    // deployment rows just written in this transaction. Only meaningful if
+    // we had any logs to stage.
+    if !logs.is_empty() {
+        upsert_erc20_tokens_from_staging_logs(&tx).await?;
     }
 
     // ── single COMMIT ─────────────────────────────────────────────────────
