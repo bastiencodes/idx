@@ -116,7 +116,7 @@ pub struct ChainConfig {
     /// Maintain the decoded-signatures cache for this chain (default: false).
     /// When true, `tidx seed-signatures` will load Sourcify's signature dump
     /// into this chain's database, and the API will decode calldata/logs on
-    /// request. Storage cost is ~1.6 GB per chain.
+    /// request. Storage cost is ~1.68 GB per chain (as of April 2026).
     #[serde(default)]
     pub decode: bool,
 

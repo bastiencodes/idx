@@ -1,3 +1,8 @@
+//! Seed the per-chain `signatures` cache from Sourcify's Parquet export.
+//!
+//! Dataset: <https://docs.sourcify.dev/docs/repository/download-dataset/>
+//! Bucket:  `s3://sourcify-production-parquet-export/v2/signatures/`
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Args as ClapArgs;

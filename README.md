@@ -476,7 +476,7 @@ Combined with the types embedded in the signature, this is enough to decode
 calldata and event logs to `{name, inputs[]}` form on read.
 
 - **Source** — Sourcify `v2/signatures/` bucket (GCS-backed, public, updated daily). ~8M canonical keccak-to-text mappings, ~420 MB compressed.
-- **Storage** — per-chain `signatures` table in Postgres, ~1.6 GB loaded.
+- **Storage** — per-chain `signatures` table in Postgres, ~1.68 GB loaded (as of April 2026).
 - **Opt-in** — set `decode = true` per chain in `config.toml`. Defaults to off; the flag gates `tidx seed-signatures` today and will gate the API decode path once it lands.
 - **Collisions** — multiple text signatures can share a 4-byte function selector. The decoder tries each candidate against the calldata via `alloy-dyn-abi` and keeps the one that parses. Event topic0s are 32-byte and don't collide in practice.
 
