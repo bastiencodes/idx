@@ -6,11 +6,20 @@
 
 use std::time::Instant;
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiError, AppState};
+
+#[derive(Deserialize)]
+pub struct TokensParams {
+    #[serde(alias = "chain_id", rename = "chainId")]
+    chain_id: u64,
+}
 
 #[derive(Serialize)]
 pub struct Erc20Token {
@@ -45,16 +54,17 @@ pub struct Erc20TokensResponse {
 /// thousands of rows on mainnet).
 const LIST_LIMIT: i64 = 100;
 
-/// GET /erc20/tokens
+/// GET /erc20/tokens?chainId=X
 ///
 /// Returns the [`LIST_LIMIT`] most recently discovered ERC20 tokens.
 pub async fn list_tokens(
     State(state): State<AppState>,
+    Query(params): Query<TokensParams>,
 ) -> Result<Json<Erc20TokensResponse>, ApiError> {
     let pool = state
-        .get_pool(None)
+        .get_pool(Some(params.chain_id))
         .await
-        .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
+        .ok_or_else(|| ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id)))?;
     let conn = pool
         .get()
         .await
