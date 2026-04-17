@@ -352,15 +352,6 @@ pub struct TransactionDetail {
     effective_gas_price: Option<String>,
     status: Option<i16>,
     contract_address: Option<String>,
-    logs: Vec<TransactionLog>,
-}
-
-#[derive(Serialize)]
-pub struct TransactionLog {
-    log_index: i32,
-    address: String,
-    topics: Vec<String>,
-    data: String,
 }
 
 #[derive(Serialize)]
@@ -403,12 +394,6 @@ pub async fn get_transaction(
     let input_col: Vec<u8> = row.get(9);
     let contract_address: Option<Vec<u8>> = row.get(16);
 
-    let log_rows = conn
-        .query(LOGS_SQL, &[&hash_bytes])
-        .await
-        .map_err(|e| ApiError::QueryError(e.to_string()))?;
-    let logs: Vec<TransactionLog> = log_rows.iter().map(row_to_log).collect();
-
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(Json(TransactionResponse {
@@ -433,32 +418,9 @@ pub async fn get_transaction(
             effective_gas_price: row.get(15),
             status: row.get(17),
             contract_address: contract_address.as_deref().map(hex_prefixed),
-            logs,
         },
         query_time_ms,
     }))
-}
-
-fn row_to_log(row: &tokio_postgres::Row) -> TransactionLog {
-    let address: Vec<u8> = row.get(1);
-    let topic0: Option<Vec<u8>> = row.get(2);
-    let topic1: Option<Vec<u8>> = row.get(3);
-    let topic2: Option<Vec<u8>> = row.get(4);
-    let topic3: Option<Vec<u8>> = row.get(5);
-    let data: Vec<u8> = row.get(6);
-
-    let topics = [topic0, topic1, topic2, topic3]
-        .into_iter()
-        .flatten()
-        .map(|b| hex_prefixed(&b))
-        .collect();
-
-    TransactionLog {
-        log_index: row.get(0),
-        address: hex_prefixed(&address),
-        topics,
-        data: hex_prefixed(&data),
-    }
 }
 
 const DETAIL_SQL: &str = r#"
@@ -487,20 +449,6 @@ const DETAIL_SQL: &str = r#"
      AND r.block_num = t.block_num
     WHERE t.hash = $1
     LIMIT 1
-"#;
-
-const LOGS_SQL: &str = r#"
-    SELECT
-        log_idx,
-        address,
-        topic0,
-        topic1,
-        topic2,
-        topic3,
-        data
-    FROM logs
-    WHERE tx_hash = $1
-    ORDER BY log_idx ASC
 "#;
 
 fn parse_tx_hash(id: &str) -> Result<Vec<u8>, ApiError> {
