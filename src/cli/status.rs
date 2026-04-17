@@ -249,10 +249,8 @@ async fn print_json_status(config: &Config) -> Result<()> {
     let mut chains = Vec::new();
 
     for chain in &config.chains {
-        let live_head = RpcClient::new(&chain.rpc_url)
-            .latest_block_number()
-            .await
-            .ok();
+        let rpc = RpcClient::new(&chain.rpc_url);
+        let live_head = rpc.latest_block_number().await.ok();
 
         let (state, gaps) = match chain.resolved_pg_url() {
             Ok(pg_url) => match db::create_pool(&pg_url).await {
