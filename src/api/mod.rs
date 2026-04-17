@@ -181,6 +181,7 @@ fn build_router(state: AppState) -> Router<()> {
         .route("/blocks", get(blocks::list_blocks))
         .route("/blocks/{identifier}", get(blocks::get_block))
         .route("/transactions", get(transactions::list_transactions))
+        .route("/transactions/{hash}", get(transactions::get_transaction))
         .route("/erc20/approvals", get(erc20::approvals::list_approvals))
         .route("/erc20/tokens", get(erc20::tokens::list_tokens))
         .route("/erc20/transfers", get(erc20::transfers::list_transfers))
