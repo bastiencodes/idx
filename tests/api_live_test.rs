@@ -473,6 +473,79 @@ async fn test_transactions_live_without_decode_omits_field() {
     }
 }
 
+#[tokio::test]
+#[serial(db)]
+async fn test_transactions_live_labels_populates_labels_field() {
+    let db = TestDb::new().await;
+    let broadcaster = Arc::new(Broadcaster::new());
+    let (pools, chain_id) = make_pools(db.pool.clone());
+    let mut app = make_test_service(pools, chain_id, broadcaster).await;
+
+    // With labels=true, every tx in the initial snapshot must serialize a
+    // `labels` key (value is an object, possibly empty if no addresses match).
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&live=true&labels=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = read_first_sse_frame(response.into_body()).await;
+    let (event, json) = parse_sse_frame(&frame);
+    assert_eq!(event, "result", "frame: {frame}");
+    assert_eq!(json["ok"], true);
+
+    let txs = json["transactions"].as_array().expect("transactions array");
+    assert!(!txs.is_empty(), "expected seeded txs in initial snapshot");
+    for (i, tx) in txs.iter().enumerate() {
+        assert!(
+            tx.get("labels").is_some(),
+            "tx[{i}] missing `labels` field with labels=true: {tx}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn test_transactions_live_without_labels_omits_field() {
+    let db = TestDb::new().await;
+    let broadcaster = Arc::new(Broadcaster::new());
+    let (pools, chain_id) = make_pools(db.pool.clone());
+    let mut app = make_test_service(pools, chain_id, broadcaster).await;
+
+    // Sanity check the inverse: without `labels=true`, `labels` is omitted
+    // (skip_serializing_if on Option::is_none).
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&live=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = read_first_sse_frame(response.into_body()).await;
+    let (event, json) = parse_sse_frame(&frame);
+    assert_eq!(event, "result", "frame: {frame}");
+
+    let txs = json["transactions"].as_array().expect("transactions array");
+    assert!(!txs.is_empty(), "expected seeded txs in initial snapshot");
+    for (i, tx) in txs.iter().enumerate() {
+        assert!(
+            tx.get("labels").is_none(),
+            "tx[{i}] should omit `labels` without labels=true: {tx}"
+        );
+    }
+}
+
 // Unit tests for inject_block_filter (no DB required)
 
 #[test]

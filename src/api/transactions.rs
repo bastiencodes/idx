@@ -23,9 +23,11 @@
 //!                                                 / `error`). Not compatible
 //!                                                 with `block=`, `address=`,
 //!                                                 or pagination params.
-//!                                                 Accepts `&decode=true` to
-//!                                                 populate `decoded` on each
-//!                                                 streamed tx.
+//!                                                 Accepts `&decode=true` and
+//!                                                 `&labels=true` to populate
+//!                                                 `decoded` / `labels` on each
+//!                                                 streamed tx (same semantics
+//!                                                 as the non-live path).
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -632,6 +634,9 @@ async fn handle_live(
                             tx.decoded = Some(d);
                         }
                     }
+                    if params.labels {
+                        attach_labels(&pool, &rows, &mut transactions).await;
+                    }
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
                     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -705,6 +710,9 @@ async fn handle_live(
                                     for (tx, d) in transactions.iter_mut().zip(decoded) {
                                         tx.decoded = Some(d);
                                     }
+                                }
+                                if params.labels {
+                                    attach_labels(&pool, &rows, &mut transactions).await;
                                 }
                                 let count = transactions.len();
                                 let resp = TransactionsResponse {
