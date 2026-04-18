@@ -478,9 +478,9 @@ A new token appears as `pending` within sync latency (~2–12s) and flips to `ok
 
 #### Token Lists
 
-*"Token lists"* is the ecosystem term for curated registries of token metadata maintained off-chain — see [Uniswap's Token Lists specification](https://github.com/Uniswap/token-lists) for the canonical JSON-schema standard. Trust Wallet publishes equivalent data in its own per-token layout; we mirror that specifically today. The `tw_assets` table is Trust-Wallet-shaped but the `#### Token Lists` heading describes the category, so additional sources (1inch, CoinGecko, Uniswap lists) could land as sibling tables (`<source>_assets`) later without repositioning.
+*"Token lists"* is the ecosystem term for curated registries of token metadata maintained off-chain — see [Uniswap's Token Lists specification](https://github.com/Uniswap/token-lists) for the canonical JSON-schema standard. The shared `token_list` table is loosely modelled on the spec's `TokenInfo` shape and keyed on `(source, chain_id, address)` so multiple registries can coexist. Trust Wallet is the first source we mirror; additional sources (1inch, CoinGecko, Uniswap lists) will land as additional `source` values in the same table.
 
-For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into the `tw_assets` table and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
+For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into `token_list` under `source = 'trustwallet'` and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
 
 Each worker tick has two phases, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
 
@@ -499,7 +499,7 @@ enabled = true             # default: true
 refresh_interval = 86400   # seconds between refreshes; default: 86_400 (24h)
 ```
 
-Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `tw_assets` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
+Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `token_list` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
 
 #### Labels
 

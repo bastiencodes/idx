@@ -1,10 +1,11 @@
-//! Trust Wallet assets enrichment worker.
+//! Trust Wallet token-list worker.
 //!
 //! Mirrors the curated metadata that `trustwallet/assets` publishes for
 //! each listed ERC20 (name, website, description, explorer, status, tags,
-//! links, …) into the `tw_assets` table so it can be joined
-//! into the `/erc20/tokens` response alongside the on-chain metadata
-//! resolved by `erc20_metadata.rs`.
+//! links, …) into the shared `token_list` table (under
+//! `source = 'trustwallet'`) so it can be joined into the `/erc20/tokens`
+//! response alongside the on-chain metadata resolved by
+//! `erc20_metadata.rs`.
 //!
 //! # Fetch strategy
 //!
@@ -15,10 +16,10 @@
 //!    `api.github.com/repos/trustwallet/assets/git/trees/master?recursive=1`
 //!    returns the entire repo tree (~16 MB, un-truncated, un-authenticated)
 //!    along with a Git blob SHA per `info.json`. We filter to this chain's
-//!    slug and cache the result in-memory as `address → info_sha`.
+//!    slug and cache the result in-memory as `address → source_sha`.
 //!
 //! 2. **Selective fetch** — intersect our `erc20_tokens` rows with the
-//!    cached tree and, for each match whose stored `info_sha` differs from
+//!    cached tree and, for each match whose stored `source_sha` differs from
 //!    the upstream sha (or has no row yet), fetch just that `info.json`
 //!    from `raw.githubusercontent.com` and upsert the parsed fields.
 //!    Addresses present in our table but absent from the tree are deleted.
@@ -64,6 +65,10 @@ const FETCH_CONCURRENCY: usize = 4;
 /// fetches. Tree calls take a few seconds; info.json is sub-second.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `source` tag this worker writes to in the shared `token_list` table.
+/// Part of the composite PK together with `(chain_id, address)`.
+const SOURCE_NAME: &str = "trustwallet";
+
 /// Chain-id → Trust Wallet blockchain slug. Only chains in this table are
 /// enriched; everything else (e.g. sepolia, private testnets) no-ops.
 const TW_CHAIN_SLUGS: &[(u64, &str)] = &[
@@ -105,7 +110,7 @@ pub fn logo_url(slug: &str, addr: &Address) -> String {
 }
 
 /// Background worker that mirrors Trust Wallet's curated metadata into
-/// `tw_assets`.
+/// `token_list`.
 pub struct TwAssetsWorker {
     pool: Pool,
     chain_id: u64,
@@ -115,7 +120,7 @@ pub struct TwAssetsWorker {
     /// for `compute_backoff`.
     tick_interval: Duration,
 
-    /// In-memory cache of `address → info_sha` from the latest tree
+    /// In-memory cache of `address → source_sha` from the latest tree
     /// refresh. Filtered to this worker's chain slug.
     tree: Option<HashMap<[u8; 20], String>>,
 }
@@ -149,7 +154,7 @@ impl TwAssetsWorker {
             chain_id = self.chain_id,
             slug = self.slug,
             tick_secs = self.tick_interval.as_secs(),
-            "Starting tw_assets worker"
+            "Starting token_list worker"
         );
 
         let mut consecutive_failures: u32 = 0;
@@ -165,7 +170,7 @@ impl TwAssetsWorker {
                         error = %e,
                         consecutive_failures,
                         next_retry_secs = next.as_secs(),
-                        "tw_assets tick failed"
+                        "token_list tick failed"
                     );
                 }
             }
@@ -173,7 +178,7 @@ impl TwAssetsWorker {
             let delay = compute_backoff(self.tick_interval, consecutive_failures);
             tokio::select! {
                 _ = shutdown.recv() => {
-                    info!(chain_id = self.chain_id, "Shutting down tw_assets worker");
+                    info!(chain_id = self.chain_id, "Shutting down token_list worker");
                     break;
                 }
                 _ = tokio::time::sleep(delay) => {}
@@ -219,7 +224,7 @@ impl TwAssetsWorker {
             matched = ours.iter().filter(|a| tree.contains_key(*a)).count(),
             fetched,
             deleted,
-            "tw_assets tick complete"
+            "token_list tick complete"
         );
         Ok(())
     }
@@ -255,7 +260,7 @@ impl TwAssetsWorker {
             slug = self.slug,
             listed = tree.len(),
             duration_ms,
-            "Refreshed tw_assets tree"
+            "Refreshed token_list tree"
         );
         self.tree = Some(tree);
         Ok(())
@@ -272,14 +277,15 @@ impl TwAssetsWorker {
         Ok(rows.iter().filter_map(row_to_addr_bytes).collect())
     }
 
-    /// Returns the current `(address → info_sha)` mapping stored in
-    /// `tw_assets` for this chain.
+    /// Returns the current `(address → source_sha)` mapping stored in
+    /// `token_list` for this chain and source.
     async fn load_stored_shas(&self) -> Result<HashMap<[u8; 20], String>> {
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT address, info_sha FROM tw_assets WHERE chain_id = $1",
-                &[&(self.chain_id as i64)],
+                "SELECT address, source_sha FROM token_list \
+                 WHERE source = $1 AND chain_id = $2",
+                &[&SOURCE_NAME, &(self.chain_id as i64)],
             )
             .await?;
         let mut out = HashMap::with_capacity(rows.len());
@@ -307,8 +313,15 @@ impl TwAssetsWorker {
             .map(|(addr_bytes, upstream_sha)| async move {
                 let addr = Address::from_slice(&addr_bytes);
                 match fetch_info_json(http, slug, &addr).await {
-                    Ok(parsed) => match upsert_asset(pool, chain_id, &addr_bytes, &upstream_sha, &parsed)
-                        .await
+                    Ok(parsed) => match upsert_asset(
+                        pool,
+                        chain_id,
+                        slug,
+                        &addr_bytes,
+                        &upstream_sha,
+                        &parsed,
+                    )
+                    .await
                     {
                         Ok(()) => Some(()),
                         Err(e) => {
@@ -349,8 +362,9 @@ impl TwAssetsWorker {
         for addr in addresses {
             let affected = conn
                 .execute(
-                    "DELETE FROM tw_assets WHERE chain_id = $1 AND address = $2",
-                    &[&(self.chain_id as i64), &addr.as_slice()],
+                    "DELETE FROM token_list \
+                     WHERE source = $1 AND chain_id = $2 AND address = $3",
+                    &[&SOURCE_NAME, &(self.chain_id as i64), &addr.as_slice()],
                 )
                 .await?;
             deleted += affected as usize;
@@ -387,37 +401,45 @@ async fn fetch_info_json(
     Ok(parsed)
 }
 
-/// Upsert a resolved info.json into `tw_assets`. The primary key
-/// `(chain_id, address)` makes this idempotent across re-fetches of the
-/// same blob sha (which we already filter out upstream, but the DB is the
-/// source of truth).
+/// Upsert a resolved info.json into `token_list` under
+/// `source = 'trustwallet'`. The composite PK `(source, chain_id, address)`
+/// makes this idempotent across re-fetches of the same blob sha (which
+/// we already filter out upstream, but the DB is the source of truth).
 async fn upsert_asset(
     pool: &Pool,
     chain_id: u64,
+    slug: &str,
     address: &[u8; 20],
-    info_sha: &str,
+    source_sha: &str,
     info: &InfoJson,
 ) -> Result<()> {
+    // Compute the spec-compliant logoURI at insert-time. Deterministic
+    // from (slug, EIP-55 address) so we don't need DB migrations when
+    // Trust Wallet churns individual logos.
+    let addr = Address::from_slice(address);
+    let logo = logo_url(slug, &addr);
+
     let conn = pool.get().await?;
     conn.execute(
         r#"
-        INSERT INTO tw_assets (
-            chain_id, address, info_sha,
+        INSERT INTO token_list (
+            source, chain_id, address, source_sha,
             name, symbol, decimals, asset_type,
-            website, description, explorer, status,
+            logo_uri, website, description, explorer, status,
             tags, links, fetched_at
         ) VALUES (
-            $1, $2, $3,
-            $4, $5, $6, $7,
-            $8, $9, $10, $11,
-            $12, $13, NOW()
+            $1, $2, $3, $4,
+            $5, $6, $7, $8,
+            $9, $10, $11, $12, $13,
+            $14, $15, NOW()
         )
-        ON CONFLICT (chain_id, address) DO UPDATE SET
-            info_sha    = EXCLUDED.info_sha,
+        ON CONFLICT (source, chain_id, address) DO UPDATE SET
+            source_sha  = EXCLUDED.source_sha,
             name        = EXCLUDED.name,
             symbol      = EXCLUDED.symbol,
             decimals    = EXCLUDED.decimals,
             asset_type  = EXCLUDED.asset_type,
+            logo_uri    = EXCLUDED.logo_uri,
             website     = EXCLUDED.website,
             description = EXCLUDED.description,
             explorer    = EXCLUDED.explorer,
@@ -427,13 +449,15 @@ async fn upsert_asset(
             fetched_at  = EXCLUDED.fetched_at
         "#,
         &[
+            &SOURCE_NAME,
             &(chain_id as i64),
             &address.as_slice(),
-            &info_sha,
+            &source_sha,
             &info.name,
             &info.symbol,
             &info.decimals,
             &info.asset_type,
+            &logo,
             &info.website,
             &info.description,
             &info.explorer,
@@ -447,7 +471,7 @@ async fn upsert_asset(
 }
 
 /// Filter a recursive tree response down to this chain's info.json entries
-/// and return `address → info_sha`. Any entry whose path segment under
+/// and return `address → source_sha`. Any entry whose path segment under
 /// `assets/` isn't a valid 20-byte `0x…` address is skipped.
 fn parse_tree(entries: &[GitTreeEntry], slug: &str) -> HashMap<[u8; 20], String> {
     let prefix = format!("blockchains/{slug}/assets/");

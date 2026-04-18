@@ -7,15 +7,14 @@
 //! opaque `cursor` returned as `next_cursor`.
 //!
 //! Each row is enriched with Trust Wallet metadata via a LEFT JOIN on the
-//! `tw_assets` table (populated by
-//! `src/sync/tw_assets.rs`). Enrichment is purely additive —
-//! on-chain `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth;
-//! Trust Wallet adds `logo_url` (computed), `website`, `description`,
-//! `explorer`, `tags`, `links`, and `trust_wallet_status`.
+//! `token_list` table (populated by `src/sync/tw_assets.rs` under
+//! `source = 'trustwallet'`). Enrichment is purely additive — on-chain
+//! `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth; the
+//! token list adds `logo_url`, `website`, `description`, `explorer`,
+//! `tags`, `links`, and `trust_wallet_status`.
 
 use std::time::Instant;
 
-use alloy::primitives::Address;
 use axum::{
     extract::{Query, State},
     Json,
@@ -25,7 +24,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::api::{ApiError, AppState};
-use crate::sync::tw_assets;
+
+/// Today we only surface the `trustwallet` source in `/erc20/tokens`
+/// enrichment; adding a second source is a follow-up that will likely
+/// grow a `?source=` query parameter.
+const TW_SOURCE: &str = "trustwallet";
 
 /// Keyset cursor: `first_transfer_at` plus the contract address as a
 /// tiebreaker, since multiple tokens can share a block timestamp.
@@ -65,9 +68,8 @@ pub struct Erc20Token {
     resolved_block: Option<i64>,
 
     // ── Trust Wallet enrichment (null when the token isn't listed) ──────
-    /// Canonical `logo.png` URL on trustwallet/assets. Computed from the
-    /// chain slug and EIP-55 checksummed address; only emitted when a
-    /// `tw_assets` row exists for this token.
+    /// Canonical `logo.png` URL. Stored in `token_list.logo_uri` at insert
+    /// time; only emitted when a `token_list` row exists for this token.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +124,6 @@ pub async fn list_tokens(
         .map(pagination::decode)
         .transpose()?;
 
-    let tw_slug = tw_assets::slug_for(params.chain_id);
     let chain_id_i64 = params.chain_id as i64;
 
     let start = Instant::now();
@@ -137,12 +138,15 @@ pub async fn list_tokens(
                 })?;
             let addr_bytes = hex::decode(&c.a)
                 .map_err(|_| ApiError::BadRequest("invalid cursor: bad address hex".into()))?;
-            conn.query(LIST_AFTER_SQL, &[&chain_id_i64, &ts, &addr_bytes, &limit])
-                .await
-                .map_err(|e| ApiError::QueryError(e.to_string()))?
+            conn.query(
+                LIST_AFTER_SQL,
+                &[&TW_SOURCE, &chain_id_i64, &ts, &addr_bytes, &limit],
+            )
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?
         }
         None => conn
-            .query(LIST_SQL, &[&chain_id_i64, &limit])
+            .query(LIST_SQL, &[&TW_SOURCE, &chain_id_i64, &limit])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
     };
@@ -154,7 +158,7 @@ pub async fn list_tokens(
         .map_err(|e| ApiError::QueryError(e.to_string()))?
         .get(0);
 
-    let tokens: Vec<Erc20Token> = rows.iter().map(|r| row_to_token(r, tw_slug)).collect();
+    let tokens: Vec<Erc20Token> = rows.iter().map(row_to_token).collect();
     let count = tokens.len();
     let next_cursor = next_cursor_for(&rows, limit);
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -169,23 +173,23 @@ pub async fn list_tokens(
     }))
 }
 
-// LEFT JOINs `tw_assets` by the chain_id bound parameter so the
-// join predicate is sargable on the composite PK. `twa.info_sha` doubles
-// as the "row exists" sentinel because it's the only NOT NULL TW column
-// aside from the key.
+// LEFT JOINs `token_list` on the composite PK `(source, chain_id, address)`
+// so the join is sargable. `tl.logo_uri` doubles as the "row exists"
+// signal since it's what the worker always writes; absence means the
+// source hasn't listed this token.
 const LIST_SQL: &str = r#"
     SELECT t.address, t.name, t.symbol, t.decimals,
            t.first_transfer_at, t.first_transfer_block,
            t.deployed_at, t.deployed_block,
            t.resolution_status, t.resolved_at, t.resolved_block,
-           twa.info_sha,
-           twa.website, twa.description, twa.explorer,
-           twa.status, twa.tags, twa.links
+           tl.logo_uri,
+           tl.website, tl.description, tl.explorer,
+           tl.status, tl.tags, tl.links
     FROM erc20_tokens t
-    LEFT JOIN tw_assets twa
-      ON twa.chain_id = $1 AND twa.address = t.address
+    LEFT JOIN token_list tl
+      ON tl.source = $1 AND tl.chain_id = $2 AND tl.address = t.address
     ORDER BY t.first_transfer_at DESC, t.address DESC
-    LIMIT $2
+    LIMIT $3
 "#;
 
 // Tuple comparison lets the `(first_transfer_at DESC)` index range-scan past
@@ -196,15 +200,15 @@ const LIST_AFTER_SQL: &str = r#"
            t.first_transfer_at, t.first_transfer_block,
            t.deployed_at, t.deployed_block,
            t.resolution_status, t.resolved_at, t.resolved_block,
-           twa.info_sha,
-           twa.website, twa.description, twa.explorer,
-           twa.status, twa.tags, twa.links
+           tl.logo_uri,
+           tl.website, tl.description, tl.explorer,
+           tl.status, tl.tags, tl.links
     FROM erc20_tokens t
-    LEFT JOIN tw_assets twa
-      ON twa.chain_id = $1 AND twa.address = t.address
-    WHERE (t.first_transfer_at, t.address) < ($2, $3)
+    LEFT JOIN token_list tl
+      ON tl.source = $1 AND tl.chain_id = $2 AND tl.address = t.address
+    WHERE (t.first_transfer_at, t.address) < ($3, $4)
     ORDER BY t.first_transfer_at DESC, t.address DESC
-    LIMIT $4
+    LIMIT $5
 "#;
 
 fn next_cursor_for(rows: &[tokio_postgres::Row], limit: i64) -> Option<String> {
@@ -220,25 +224,11 @@ fn next_cursor_for(rows: &[tokio_postgres::Row], limit: i64) -> Option<String> {
     }))
 }
 
-fn row_to_token(row: &tokio_postgres::Row, tw_slug: Option<&str>) -> Erc20Token {
+fn row_to_token(row: &tokio_postgres::Row) -> Erc20Token {
     let address_bytes: Vec<u8> = row.get(0);
     let first_transfer_at: DateTime<Utc> = row.get(4);
     let deployed_at: Option<DateTime<Utc>> = row.get(6);
     let resolved_at: Option<DateTime<Utc>> = row.get(9);
-
-    // `info_sha` being non-NULL is the "Trust Wallet lists this token"
-    // signal from the LEFT JOIN. The logo URL is computed here rather
-    // than stored because it's deterministic from (slug, EIP-55 addr).
-    let info_sha: Option<String> = row.get(11);
-    let listed = info_sha.is_some();
-    let logo_url = match (listed, tw_slug, address_bytes.len()) {
-        (true, Some(slug), 20) => {
-            let mut arr = [0u8; 20];
-            arr.copy_from_slice(&address_bytes);
-            Some(tw_assets::logo_url(slug, &Address::from(arr)))
-        }
-        _ => None,
-    };
 
     Erc20Token {
         contract_address: format!("0x{}", hex::encode(&address_bytes)),
@@ -253,7 +243,7 @@ fn row_to_token(row: &tokio_postgres::Row, tw_slug: Option<&str>) -> Erc20Token 
         resolved_at: resolved_at.map(|d| d.to_rfc3339()),
         resolved_block: row.get(10),
 
-        logo_url,
+        logo_url: row.get(11),
         website: row.get(12),
         description: row.get(13),
         explorer: row.get(14),
