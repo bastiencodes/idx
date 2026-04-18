@@ -307,8 +307,16 @@ async fn attach_transfer_metadata(
     // LEFT JOIN so tokens missing from `token_list` still return their
     // on-chain name/symbol/decimals. `source = 'trust_wallet'` matches the
     // single source populated today (see src/api/erc20/tokens.rs).
+    //
+    // On-chain is source of truth, but we COALESCE to `token_list` so tokens
+    // with pending/failed resolution still surface human-readable metadata.
     let sql = r#"
-        SELECT t.address, t.name, t.symbol, t.decimals, tl.logo_uri
+        SELECT
+            t.address,
+            COALESCE(t.name, tl.name)         AS name,
+            COALESCE(t.symbol, tl.symbol)     AS symbol,
+            COALESCE(t.decimals, tl.decimals) AS decimals,
+            tl.logo_uri
         FROM erc20_tokens t
         LEFT JOIN token_list tl
           ON tl.source = 'trust_wallet'
