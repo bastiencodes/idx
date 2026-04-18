@@ -35,6 +35,10 @@ pub struct TransferParams {
     /// Populate `labels` on each transfer using the `labels_*` tables.
     #[serde(default)]
     labels: bool,
+    /// Populate `metadata` on each transfer by looking up `contract_address`
+    /// in `erc20_tokens` (+ `token_list` for `logo_url`).
+    #[serde(default)]
+    include_metadata: bool,
 }
 
 #[derive(Serialize)]
@@ -51,6 +55,23 @@ pub struct TransferEntry {
     /// arrays because one address commonly carries multiple tags.
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
+    /// Present only when the caller set `?include_metadata=true`. Fields are
+    /// individually omitted when missing. Always set (possibly empty) when
+    /// the flag is on so clients can rely on the key existing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<TokenMetadata>,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct TokenMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decimals: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logo_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -187,12 +208,17 @@ pub async fn list_transfers(
                 value: crate::service::format_column_json(row, 5),
                 direction,
                 labels: None,
+                metadata: None,
             }
         })
         .collect();
 
     if params.labels {
         attach_transfer_labels(&pool, &mut transfers).await;
+    }
+
+    if params.include_metadata {
+        attach_transfer_metadata(&pool, params.chain_id as i64, &mut transfers).await;
     }
 
     let count = transfers.len();
@@ -236,5 +262,106 @@ async fn attach_transfer_labels(pool: &crate::db::Pool, transfers: &mut [Transfe
             }
         }
         t.labels = Some(labels);
+    }
+}
+
+/// Batch-lookup ERC20 metadata for every distinct `contract_address` in
+/// `transfers` and attach a per-row `metadata` object. Best-effort: any PG
+/// failure logs and leaves `metadata` as the default empty struct on each row,
+/// so clients can always rely on the key being present when the flag is on.
+async fn attach_transfer_metadata(
+    pool: &crate::db::Pool,
+    chain_id: i64,
+    transfers: &mut [TransferEntry],
+) {
+    // Default every row to an empty object up front — metadata being
+    // present (even if empty) is the contract of `?include_metadata=true`.
+    for t in transfers.iter_mut() {
+        t.metadata = Some(TokenMetadata::default());
+    }
+
+    let mut addrs: Vec<[u8; 20]> = transfers
+        .iter()
+        .filter_map(|t| {
+            t.contract_address
+                .as_str()
+                .and_then(crate::labels::parse_address_20)
+        })
+        .collect();
+    if addrs.is_empty() {
+        return;
+    }
+    addrs.sort_unstable();
+    addrs.dedup();
+
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "metadata pool get failed, skipping");
+            return;
+        }
+    };
+
+    let byte_refs: Vec<&[u8]> = addrs.iter().map(|a| a.as_slice()).collect();
+
+    // LEFT JOIN so tokens missing from `token_list` still return their
+    // on-chain name/symbol/decimals. `source = 'trust_wallet'` matches the
+    // single source populated today (see src/api/erc20/tokens.rs).
+    //
+    // On-chain is source of truth, but we COALESCE to `token_list` so tokens
+    // with pending/failed resolution still surface human-readable metadata.
+    let sql = r#"
+        SELECT
+            t.address,
+            COALESCE(t.name, tl.name)         AS name,
+            COALESCE(t.symbol, tl.symbol)     AS symbol,
+            COALESCE(t.decimals, tl.decimals) AS decimals,
+            tl.logo_uri
+        FROM erc20_tokens t
+        LEFT JOIN token_list tl
+          ON tl.source = 'trust_wallet'
+         AND tl.chain_id = $1
+         AND tl.address = t.address
+        WHERE t.address = ANY($2)
+    "#;
+
+    let rows = match conn.query(sql, &[&chain_id, &byte_refs]).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "erc20_tokens metadata query failed");
+            return;
+        }
+    };
+
+    let mut map: std::collections::HashMap<[u8; 20], TokenMetadata> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let addr: &[u8] = row.get(0);
+        if addr.len() != 20 {
+            continue;
+        }
+        let mut key = [0u8; 20];
+        key.copy_from_slice(addr);
+        map.insert(
+            key,
+            TokenMetadata {
+                name: row.get(1),
+                symbol: row.get(2),
+                decimals: row.get(3),
+                logo_url: row.get(4),
+            },
+        );
+    }
+
+    for t in transfers.iter_mut() {
+        if let Some(a) = t
+            .contract_address
+            .as_str()
+            .and_then(crate::labels::parse_address_20)
+        {
+            if let Some(m) = map.get(&a) {
+                t.metadata = Some(m.clone());
+            }
+        }
     }
 }
