@@ -65,6 +65,9 @@ pub struct TransactionsParams {
     /// Populate `decoded` on each tx using the `signatures` cache.
     #[serde(default)]
     decode: bool,
+    /// Populate `labels` on each tx using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 /// Cursor for the LATEST path (`ORDER BY block_num DESC, idx DESC`).
@@ -118,6 +121,12 @@ pub struct Transaction {
     /// `{name, signature, inputs[]}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     decoded: Option<Option<crate::decoder::Decoded>>,
+    /// Present only when the caller set `?labels=true`. Keys (`from`, `to`,
+    /// `contract_address`) are omitted when no label was found. Values are
+    /// arrays because one address commonly carries multiple tags (e.g.
+    /// `["uniswap", "dex"]` or `["tornado-cash", "blocked"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -266,6 +275,9 @@ async fn handle_once(
         for (tx, d) in transactions.iter_mut().zip(decoded) {
             tx.decoded = Some(d);
         }
+    }
+    if params.labels {
+        attach_labels(&pool, &rows, &mut transactions).await;
     }
     let count = transactions.len();
     let next_cursor = next_cursor_for(&transactions, limit, variant);
@@ -506,6 +518,67 @@ fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
         contract_address: contract_address.as_deref().map(hex_prefixed),
         status: row.get(17),
         decoded: None,
+        labels: None,
+    }
+}
+
+/// Collect the unique (from/to/contract_address) addresses across `rows`,
+/// call [`crate::labels::lookup_batch`] once, and populate each tx's
+/// `labels` field. Rows with no labels get an empty BTreeMap so the
+/// `labels: {}` key is still present in the response.
+async fn attach_labels(
+    pool: &crate::db::Pool,
+    rows: &[tokio_postgres::Row],
+    txs: &mut [Transaction],
+) {
+    let mut addrs: Vec<[u8; 20]> = Vec::with_capacity(rows.len() * 3);
+    for row in rows {
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            addrs.push(a);
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                addrs.push(a);
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                addrs.push(a);
+            }
+        }
+    }
+
+    let map = crate::labels::lookup_batch(pool, &addrs).await;
+
+    for (row, tx) in rows.iter().zip(txs.iter_mut()) {
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
+            std::collections::BTreeMap::new();
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            if let Some(ls) = map.get(&a) {
+                labels.insert("from", ls.clone());
+            }
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("to", ls.clone());
+                }
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("contract_address", ls.clone());
+                }
+            }
+        }
+        tx.labels = Some(labels);
     }
 }
 
@@ -688,6 +761,9 @@ pub struct TransactionDetailParams {
     /// Populate `decoded` on the tx using the `signatures` cache.
     #[serde(default)]
     decode: bool,
+    /// Populate `labels` on the tx using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 /// `GET /transactions/:hash?chainId=X` — `hash` is a `0x`-prefixed 32-byte transaction hash.
@@ -726,6 +802,9 @@ pub async fn get_transaction(
             .next()
             .flatten();
         transaction.decoded = Some(decoded);
+    }
+    if params.labels {
+        attach_labels(&pool, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
 
     Ok(Json(TransactionResponse {
