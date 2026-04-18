@@ -14,7 +14,7 @@ use tidx::api::{
 };
 use tidx::broadcast::Broadcaster;
 use tidx::clickhouse::ClickHouseEngine;
-use tidx::config::{ChainConfig, Config, ConfigWatcher, NewChainEvent};
+use tidx::config::{ChainConfig, Config, ConfigWatcher, MetadataConfig, NewChainEvent};
 use tidx::db::{self, ThrottledPool};
 use tidx::sync::ch_sink::ClickHouseSink;
 use tidx::sync::engine::SyncEngine;
@@ -121,6 +121,7 @@ pub async fn run(args: Args) -> Result<()> {
 
         spawn_sync_engine(
             chain.clone(),
+            config.metadata.clone(),
             throttled_pool,
             broadcaster.clone(),
             shutdown_tx.subscribe(),
@@ -169,6 +170,7 @@ pub async fn run(args: Args) -> Result<()> {
         let chain_names_for_watcher = Arc::clone(&chain_names);
         let broadcaster_for_watcher = broadcaster.clone();
         let shutdown_tx_for_watcher = shutdown_tx.clone();
+        let metadata_for_watcher = config.metadata.clone();
 
         tokio::spawn(async move {
             while let Some(event) = chain_rx.recv().await {
@@ -194,6 +196,7 @@ pub async fn run(args: Args) -> Result<()> {
 
                         spawn_sync_engine(
                             event.chain,
+                            metadata_for_watcher.clone(),
                             throttled_pool,
                             broadcaster_for_watcher.clone(),
                             shutdown_tx_for_watcher.subscribe(),
@@ -274,6 +277,7 @@ async fn initialize_chain(
 
 fn spawn_sync_engine(
     chain: ChainConfig,
+    metadata: MetadataConfig,
     throttled_pool: ThrottledPool,
     broadcaster: Arc<Broadcaster>,
     shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -425,17 +429,20 @@ fn spawn_sync_engine(
             });
         }
 
-        // Spawn the Trust Wallet assets enrichment worker. Only starts for
-        // chains Trust Wallet publishes a registry for (see TW_CHAIN_SLUGS
-        // in trustwallet_metadata.rs); otherwise `new` returns None and we
-        // skip silently.
-        {
+        // Spawn the tw_assets worker. Only starts for chains Trust Wallet
+        // publishes a registry for (see TW_CHAIN_SLUGS in tw_assets.rs);
+        // otherwise `new` returns None and we skip silently. Also skipped
+        // when `[metadata.tw_assets].enabled = false` in config.toml.
+        if metadata.tw_assets.enabled {
             let tw_pool = throttled_pool.inner().clone();
             let tw_chain_id = chain.chain_id;
             let tw_shutdown = shutdown_rx.resubscribe();
-            if let Some(worker) =
-                tidx::sync::trustwallet_metadata::TrustWalletWorker::new(tw_pool, tw_chain_id)
-            {
+            let tw_tick = std::time::Duration::from_secs(metadata.tw_assets.tick_secs);
+            if let Some(worker) = tidx::sync::tw_assets::TwAssetsWorker::new(
+                tw_pool,
+                tw_chain_id,
+                Some(tw_tick),
+            ) {
                 tokio::spawn(async move {
                     worker.run(tw_shutdown).await;
                 });

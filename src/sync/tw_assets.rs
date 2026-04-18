@@ -11,21 +11,20 @@
 //! Two phases, driven by GitHub's Git Trees API to minimise redundant
 //! network work:
 //!
-//! 1. **Tree refresh** — once per [`TREE_REFRESH_INTERVAL`], one call to
+//! 1. **Tree refresh** — one call to
 //!    `api.github.com/repos/trustwallet/assets/git/trees/master?recursive=1`
 //!    returns the entire repo tree (~16 MB, un-truncated, un-authenticated)
 //!    along with a Git blob SHA per `info.json`. We filter to this chain's
 //!    slug and cache the result in-memory as `address → info_sha`.
 //!
-//! 2. **Selective fetch** — every [`TICK_INTERVAL`] we intersect our
-//!    `erc20_tokens` rows with the cached tree and, for each match whose
-//!    stored `info_sha` differs from the upstream sha (or has no row yet),
-//!    fetch just that `info.json` from `raw.githubusercontent.com` and
-//!    upsert the parsed fields. Addresses present in our table but absent
-//!    from the tree are deleted (upstream removal).
+//! 2. **Selective fetch** — intersect our `erc20_tokens` rows with the
+//!    cached tree and, for each match whose stored `info_sha` differs from
+//!    the upstream sha (or has no row yet), fetch just that `info.json`
+//!    from `raw.githubusercontent.com` and upsert the parsed fields.
+//!    Addresses present in our table but absent from the tree are deleted.
 //!
-//! Steady state is "fetched=0, deleted=0" — most ticks make zero requests
-//! against the raw CDN because SHAs still match.
+//! Both phases run each tick; the tick cadence is configurable per
+//! `[metadata]` in `config.toml` and defaults to 24h.
 //!
 //! # Chain support
 //!
@@ -45,13 +44,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::Pool;
 
-/// Outer tick interval. Every tick does a Phase-B pass against the cached
-/// tree, even if the tree itself is still fresh.
-pub const TICK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-
-/// How often we refresh the cached repo tree. info.json changes rarely
-/// upstream, so once/day keeps us close to live without hammering GitHub.
-pub const TREE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Default tick interval when `[metadata]` `tw_tick_secs` isn't set.
+/// 24h is a good match for how slowly upstream changes — both the tree
+/// structure and individual info.json blobs typically go weeks without
+/// meaningful edits.
+pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Ceiling for the exponential-backoff delay after consecutive tick
 /// failures. Truncated at 1 hour so a recovered upstream is retried
@@ -109,23 +106,26 @@ pub fn logo_url(slug: &str, addr: &Address) -> String {
 
 /// Background worker that mirrors Trust Wallet's curated metadata into
 /// `tw_assets`.
-pub struct TrustWalletWorker {
+pub struct TwAssetsWorker {
     pool: Pool,
     chain_id: u64,
     slug: &'static str,
     http: reqwest::Client,
+    /// Baseline tick interval (between successful ticks). Source of truth
+    /// for `compute_backoff`.
+    tick_interval: Duration,
 
     /// In-memory cache of `address → info_sha` from the latest tree
     /// refresh. Filtered to this worker's chain slug.
     tree: Option<HashMap<[u8; 20], String>>,
-    tree_fetched_at: Option<Instant>,
 }
 
-impl TrustWalletWorker {
+impl TwAssetsWorker {
     /// Constructs a worker for `chain_id`. Returns `None` when the chain
     /// has no Trust Wallet slug mapping — avoids spawning a no-op task for
-    /// chains Trust Wallet doesn't cover.
-    pub fn new(pool: Pool, chain_id: u64) -> Option<Self> {
+    /// chains Trust Wallet doesn't cover. `tick_interval` defaults to
+    /// [`DEFAULT_TICK_INTERVAL`] when `None`.
+    pub fn new(pool: Pool, chain_id: u64, tick_interval: Option<Duration>) -> Option<Self> {
         let slug = slug_for(chain_id)?;
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -137,20 +137,19 @@ impl TrustWalletWorker {
             chain_id,
             slug,
             http,
+            tick_interval: tick_interval.unwrap_or(DEFAULT_TICK_INTERVAL),
             tree: None,
-            tree_fetched_at: None,
         })
     }
 
     /// Runs until the shutdown receiver fires. Each iteration refreshes
-    /// the tree cache if stale and then does a selective info.json pass.
+    /// the cached tree and then does a selective info.json pass.
     pub async fn run(mut self, mut shutdown: broadcast::Receiver<()>) {
         info!(
             chain_id = self.chain_id,
             slug = self.slug,
-            tick_secs = TICK_INTERVAL.as_secs(),
-            tree_refresh_secs = TREE_REFRESH_INTERVAL.as_secs(),
-            "Starting Trust Wallet metadata worker"
+            tick_secs = self.tick_interval.as_secs(),
+            "Starting tw_assets worker"
         );
 
         let mut consecutive_failures: u32 = 0;
@@ -160,21 +159,21 @@ impl TrustWalletWorker {
                 Ok(()) => consecutive_failures = 0,
                 Err(e) => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
-                    let next = compute_backoff(consecutive_failures);
+                    let next = compute_backoff(self.tick_interval, consecutive_failures);
                     error!(
                         chain_id = self.chain_id,
                         error = %e,
                         consecutive_failures,
                         next_retry_secs = next.as_secs(),
-                        "Trust Wallet metadata tick failed"
+                        "tw_assets tick failed"
                     );
                 }
             }
 
-            let delay = compute_backoff(consecutive_failures);
+            let delay = compute_backoff(self.tick_interval, consecutive_failures);
             tokio::select! {
                 _ = shutdown.recv() => {
-                    info!(chain_id = self.chain_id, "Shutting down Trust Wallet metadata worker");
+                    info!(chain_id = self.chain_id, "Shutting down tw_assets worker");
                     break;
                 }
                 _ = tokio::time::sleep(delay) => {}
@@ -183,7 +182,7 @@ impl TrustWalletWorker {
     }
 
     async fn tick(&mut self) -> Result<()> {
-        self.ensure_tree_fresh().await?;
+        self.refresh_tree().await?;
         let tree = self
             .tree
             .as_ref()
@@ -220,22 +219,15 @@ impl TrustWalletWorker {
             matched = ours.iter().filter(|a| tree.contains_key(*a)).count(),
             fetched,
             deleted,
-            "Trust Wallet tick complete"
+            "tw_assets tick complete"
         );
         Ok(())
     }
 
-    /// Refreshes the in-memory tree cache when it's missing or older than
-    /// [`TREE_REFRESH_INTERVAL`]. Failures leave the previous cache intact
-    /// so a single flaky GitHub call doesn't wipe good data.
-    async fn ensure_tree_fresh(&mut self) -> Result<()> {
-        let stale = self
-            .tree_fetched_at
-            .is_none_or(|t| t.elapsed() >= TREE_REFRESH_INTERVAL);
-        if !stale {
-            return Ok(());
-        }
-
+    /// Fetches the current Trust Wallet tree and replaces the in-memory
+    /// cache. Failures propagate to the tick and leave the previous cache
+    /// intact so a single flaky GitHub call doesn't wipe good data.
+    async fn refresh_tree(&mut self) -> Result<()> {
         let url = "https://api.github.com/repos/trustwallet/assets/git/trees/master?recursive=1";
         let start = Instant::now();
         let response = self
@@ -263,10 +255,9 @@ impl TrustWalletWorker {
             slug = self.slug,
             listed = tree.len(),
             duration_ms,
-            "Refreshed Trust Wallet tree"
+            "Refreshed tw_assets tree"
         );
         self.tree = Some(tree);
-        self.tree_fetched_at = Some(Instant::now());
         Ok(())
     }
 
@@ -481,14 +472,14 @@ fn parse_tree(entries: &[GitTreeEntry], slug: &str) -> HashMap<[u8; 20], String>
 }
 
 /// Truncated exponential backoff identical in shape to the ERC20 worker's:
-/// `TICK_INTERVAL * 2^failures`, capped at `MAX_BACKOFF_SECS`.
-fn compute_backoff(consecutive_failures: u32) -> Duration {
+/// `tick_interval * 2^failures`, capped at `MAX_BACKOFF_SECS`.
+fn compute_backoff(tick_interval: Duration, consecutive_failures: u32) -> Duration {
     if consecutive_failures == 0 {
-        return TICK_INTERVAL;
+        return tick_interval;
     }
     let shift = consecutive_failures.min(20);
     let multiplier: u64 = 1u64 << shift;
-    let secs = TICK_INTERVAL
+    let secs = tick_interval
         .as_secs()
         .saturating_mul(multiplier)
         .min(MAX_BACKOFF_SECS);
@@ -643,12 +634,14 @@ mod tests {
 
     #[test]
     fn backoff_starts_at_tick_interval() {
-        assert_eq!(compute_backoff(0), TICK_INTERVAL);
+        assert_eq!(compute_backoff(DEFAULT_TICK_INTERVAL, 0), DEFAULT_TICK_INTERVAL);
+        let custom = Duration::from_secs(3_600);
+        assert_eq!(compute_backoff(custom, 0), custom);
     }
 
     #[test]
     fn backoff_truncates_at_cap() {
-        let capped = compute_backoff(u32::MAX);
+        let capped = compute_backoff(DEFAULT_TICK_INTERVAL, u32::MAX);
         assert_eq!(capped, Duration::from_secs(MAX_BACKOFF_SECS));
     }
 }

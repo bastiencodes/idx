@@ -474,16 +474,28 @@ A new token appears as `pending` within sync latency (~2–12s) and flips to `ok
 
 ### Assets
 
-For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into the `tw_assets` table and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` ( `active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
+For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into the `tw_assets` table and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
 
-Two-phase fetcher, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
+Each worker tick has two phases, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
 
-- **Tree refresh (every 24h)** — one ~16 MB call to `/repos/trustwallet/assets/git/trees/master?recursive=1` returns the entire repo tree along with a Git blob SHA per `info.json`. Filtered to this chain's slug and cached in-memory.
-- **Selective fetch (every 6h)** — intersects our `erc20_tokens` with the cached tree and fetches only the `info.json` blobs whose stored SHA doesn't match the upstream SHA. Addresses the tree no longer contains are pruned.
+- **Tree refresh** — one ~16 MB call to `/repos/trustwallet/assets/git/trees/master?recursive=1` returns the entire repo tree along with a Git blob SHA per `info.json`. Filtered to this chain's slug and cached in-memory for the duration of the tick.
+- **Selective fetch** — intersects our `erc20_tokens` with the cached tree and fetches only the `info.json` blobs whose stored SHA doesn't match the upstream SHA. Addresses the tree no longer contains are pruned.
 
 Steady state is zero raw-CDN fetches per tick (SHAs match). The `logo.png` URL is deterministic from `(chain slug, EIP-55 address)` and composed at API response time — tidx doesn't mirror image bytes.
 
-Chain coverage is controlled by `TW_CHAIN_SLUGS` in [`src/sync/trustwallet_metadata.rs`](src/sync/trustwallet_metadata.rs). Chains not in that map are silently skipped (e.g. sepolia, private testnets).
+Chain coverage is controlled by `TW_CHAIN_SLUGS` in [`src/sync/tw_assets.rs`](src/sync/tw_assets.rs). Chains not in that map are silently skipped (e.g. sepolia, private testnets).
+
+#### Configuration
+
+Tick cadence and enable-switch live under `[metadata.tw_assets]` in `config.toml`:
+
+```toml
+[metadata.tw_assets]
+enabled = true       # default: true
+tick_secs = 86400    # default: 86_400 (24h)
+```
+
+Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `tw_assets` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
 
 ## Decoding
 

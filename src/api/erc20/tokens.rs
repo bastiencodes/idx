@@ -8,7 +8,7 @@
 //!
 //! Each row is enriched with Trust Wallet metadata via a LEFT JOIN on the
 //! `tw_assets` table (populated by
-//! `src/sync/trustwallet_metadata.rs`). Enrichment is purely additive —
+//! `src/sync/tw_assets.rs`). Enrichment is purely additive —
 //! on-chain `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth;
 //! Trust Wallet adds `logo_url` (computed), `website`, `description`,
 //! `explorer`, `tags`, `links`, and `trust_wallet_status`.
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::api::{ApiError, AppState};
-use crate::sync::trustwallet_metadata;
+use crate::sync::tw_assets;
 
 /// Keyset cursor: `first_transfer_at` plus the contract address as a
 /// tiebreaker, since multiple tokens can share a block timestamp.
@@ -122,7 +122,7 @@ pub async fn list_tokens(
         .map(pagination::decode)
         .transpose()?;
 
-    let tw_slug = trustwallet_metadata::slug_for(params.chain_id);
+    let tw_slug = tw_assets::slug_for(params.chain_id);
     let chain_id_i64 = params.chain_id as i64;
 
     let start = Instant::now();
@@ -235,7 +235,7 @@ fn row_to_token(row: &tokio_postgres::Row, tw_slug: Option<&str>) -> Erc20Token 
         (true, Some(slug), 20) => {
             let mut arr = [0u8; 20];
             arr.copy_from_slice(&address_bytes);
-            Some(trustwallet_metadata::logo_url(slug, &Address::from(arr)))
+            Some(tw_assets::logo_url(slug, &Address::from(arr)))
         }
         _ => None,
     };
