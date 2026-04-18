@@ -111,6 +111,27 @@ cargo bench
 | Presto (mainnet) | 4217 | https://rpc.mainnet.tempo.xyz |
 | Moderato (testnet) | 42431 | https://rpc.testnet.tempo.xyz |
 
+## API Conventions
+
+### SSE and HTTP parity
+Endpoints like `/transactions` and `/blocks` serve both a one-shot HTTP response
+and a live SSE stream (`?live=true`) from the **same handler**. Any query param
+that shapes the per-row payload (e.g. `decode=true`, `labels=true`) **must apply
+to both paths**. Concretely:
+
+- Add the param to the shared `*Params` struct once.
+- Apply it in the non-live branch (`handle_once`-style).
+- Apply it in the live branch in **both** the initial snapshot *and* the
+  per-block update loop — these are separate code sites and each needs the call.
+- Update the module docstring so live-mode callers know the param is honored.
+- If you add tests for the new param in the non-live path, add the matching SSE
+  test (see `test_transactions_live_decode_populates_decoded_field` in
+  `tests/api_live_test.rs` for the pattern).
+
+Silent divergence between the two modes is the easy failure here — a param
+parsed on the struct but skipped in the SSE closure will compile fine and be
+invisible in HTTP tests.
+
 ## Code Style
 - Follow existing patterns in the codebase
 - Use `anyhow::Result` for error handling
