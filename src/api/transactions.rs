@@ -34,6 +34,11 @@
 //!                                                 Accepts `&include_logs=true`
 //!                                                 to also fetch emitted logs
 //!                                                 ordered by `log_idx`.
+//!                                                 When combined with
+//!                                                 `&decode=true`, each log's
+//!                                                 topic0 is resolved against
+//!                                                 the `signatures` cache and
+//!                                                 best-effort decoded.
 
 use std::convert::Infallible;
 use std::time::Instant;
@@ -147,6 +152,12 @@ pub struct Log {
     /// 0-4 topics; the schema stores them as independent nullable columns.
     topics: Vec<String>,
     data: String,
+    /// Present only when the caller set both `?decode=true` and
+    /// `?include_logs=true`. Inner `None` means topic0 was not found in
+    /// the signatures cache; `Some` is the decoded `{name, signature,
+    /// inputs[]}` (may have empty `inputs` if arg decoding failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded: Option<Option<crate::decoder::Decoded>>,
 }
 
 #[derive(Serialize)]
@@ -841,7 +852,42 @@ pub async fn get_transaction(
             .query(LOGS_BY_TX_HASH_SQL, &[&hash_bytes])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?;
-        transaction.logs = Some(log_rows.iter().map(log_row_to_log).collect());
+        let mut logs: Vec<Log> = log_rows.iter().map(log_row_to_log).collect();
+
+        if params.decode && !logs.is_empty() {
+            // Build event inputs from the raw bytes (not the hex strings on
+            // `Log`, to avoid a re-decode round-trip).
+            let topics_per_row: Vec<Vec<&[u8]>> = log_rows
+                .iter()
+                .map(|r| {
+                    let t0: Option<&[u8]> = r.get(2);
+                    let t1: Option<&[u8]> = r.get(3);
+                    let t2: Option<&[u8]> = r.get(4);
+                    let t3: Option<&[u8]> = r.get(5);
+                    [t0, t1, t2, t3]
+                        .into_iter()
+                        .take_while(Option::is_some)
+                        .flatten()
+                        .collect()
+                })
+                .collect();
+            let data_per_row: Vec<&[u8]> =
+                log_rows.iter().map(|r| r.get::<_, &[u8]>(6)).collect();
+            let events: Vec<crate::decoder::EventInput<'_>> = topics_per_row
+                .iter()
+                .zip(data_per_row.iter())
+                .map(|(topics, data)| crate::decoder::EventInput {
+                    topics: topics.clone(),
+                    data,
+                })
+                .collect();
+            let decoded = crate::decoder::decode_events_batch(&conn, &events).await;
+            for (log, d) in logs.iter_mut().zip(decoded) {
+                log.decoded = Some(d);
+            }
+        }
+
+        transaction.logs = Some(logs);
     }
 
     Ok(Json(TransactionResponse {
@@ -878,6 +924,7 @@ fn log_row_to_log(row: &tokio_postgres::Row) -> Log {
         address: hex_prefixed(&address),
         topics,
         data: hex_prefixed(&data),
+        decoded: None,
     }
 }
 
