@@ -460,9 +460,11 @@ curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT 
 
 ## Metadata
 
-Supplementary tables that enrich on-chain data with off-chain context.
+Supplementary tables that enrich raw indexed data. Split by source: **on-chain** metadata comes from calling contracts directly via Multicall3, **off-chain** metadata comes from curated third-party registries mirrored into Postgres.
 
-### ERC20 Tokens
+### On-chain
+
+#### ERC20 Tokens
 
 The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
 
@@ -472,7 +474,34 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
 
-### Labels
+### Off-chain
+
+#### Token Lists
+
+*"Token lists"* is the ecosystem term for curated registries of token metadata maintained off-chain — see [Uniswap's Token Lists specification](https://github.com/Uniswap/token-lists) for the canonical JSON-schema standard. The shared `token_list` table is loosely modelled on the spec's `TokenInfo` shape and keyed on `(source, chain_id, address)` so multiple registries can coexist. Trust Wallet is the first source we mirror; additional sources (1inch, CoinGecko, Uniswap lists) will land as additional `source` values in the same table.
+
+For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into `token_list` under `source = 'trust_wallet'` and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
+
+Each worker tick has two phases, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
+
+- **Tree refresh** — one ~16 MB call to `/repos/trustwallet/assets/git/trees/master?recursive=1` returns the entire repo tree along with a Git blob SHA per `info.json`. Filtered to this chain's slug and cached in-memory for the duration of the tick.
+- **Selective fetch** — intersects our `erc20_tokens` with the cached tree and fetches only the `info.json` blobs whose stored SHA doesn't match the upstream SHA. Addresses the tree no longer contains are pruned.
+
+Steady state is zero raw-CDN fetches per tick (SHAs match). The `logo.png` URL is deterministic from `(chain slug, EIP-55 address)` and composed at API response time — tidx doesn't mirror image bytes.
+
+Chain coverage is controlled by `TW_CHAIN_SLUGS` in [`src/sync/tw_assets.rs`](src/sync/tw_assets.rs). Chains not in that map are silently skipped (e.g. sepolia, private testnets).
+
+Refresh cadence and enable-switch live under `[metadata.tw_assets]` in `config.toml`:
+
+```toml
+[metadata.tw_assets]
+enabled = true             # default: true
+refresh_interval = 86400   # seconds between refreshes; default: 86_400 (24h)
+```
+
+Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `token_list` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
+
+#### Labels
 
 Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT collections, etc.) sourced from [eth-labels](https://github.com/dawsbot/eth-labels) and stored in two per-chain tables:
 

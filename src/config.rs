@@ -16,6 +16,10 @@ pub struct Config {
     #[serde(default)]
     pub prometheus: PrometheusConfig,
 
+    /// Token metadata enrichment workers.
+    #[serde(default)]
+    pub metadata: MetadataConfig,
+
     /// Chains to index
     pub chains: Vec<ChainConfig>,
 }
@@ -68,6 +72,49 @@ impl Default for PrometheusConfig {
             port: 9090,
         }
     }
+}
+
+/// Token metadata enrichment settings. Each sub-struct controls one
+/// enrichment source; the sync workers that consume them are spawned
+/// from `cli/up.rs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataConfig {
+    /// Trust Wallet assets mirror (`tw_assets` table, `/erc20/tokens`
+    /// enrichment). See README → Metadata → Assets.
+    #[serde(default)]
+    pub tw_assets: TwAssetsConfig,
+}
+
+/// Settings for the Trust Wallet assets worker
+/// (`src/sync/tw_assets.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwAssetsConfig {
+    /// Whether to spawn the worker at all. When `false`, no process
+    /// fetches `trustwallet/assets` and the `tw_assets` table stays empty
+    /// (the `/erc20/tokens` LEFT JOIN still works — every row just yields
+    /// null Trust Wallet fields).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Seconds between data refreshes from `trustwallet/assets`. Each
+    /// refresh re-fetches the repo tree from GitHub and pulls any
+    /// `info.json` blobs whose upstream SHA has changed. Default: 86_400
+    /// (24h).
+    #[serde(default = "default_tw_refresh_interval")]
+    pub refresh_interval: u64,
+}
+
+impl Default for TwAssetsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_interval: default_tw_refresh_interval(),
+        }
+    }
+}
+
+fn default_tw_refresh_interval() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_true() -> bool {

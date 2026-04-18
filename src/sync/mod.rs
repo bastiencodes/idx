@@ -5,4 +5,5 @@ pub mod engine;
 pub mod erc20_metadata;
 pub mod fetcher;
 pub mod sink;
+pub mod tw_assets;
 pub mod writer;
