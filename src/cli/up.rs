@@ -437,7 +437,7 @@ fn spawn_sync_engine(
             let tw_pool = throttled_pool.inner().clone();
             let tw_chain_id = chain.chain_id;
             let tw_shutdown = shutdown_rx.resubscribe();
-            let tw_tick = std::time::Duration::from_secs(metadata.tw_assets.tick_secs);
+            let tw_tick = std::time::Duration::from_secs(metadata.tw_assets.refresh_interval);
             if let Some(worker) = tidx::sync::tw_assets::TwAssetsWorker::new(
                 tw_pool,
                 tw_chain_id,

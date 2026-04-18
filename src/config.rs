@@ -96,23 +96,24 @@ pub struct TwAssetsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Seconds between worker ticks. Each tick refreshes the in-memory
-    /// tree from GitHub and fetches any `info.json` blobs whose upstream
-    /// SHA has changed. Default: 86_400 (24h).
-    #[serde(default = "default_tw_tick_secs")]
-    pub tick_secs: u64,
+    /// Seconds between data refreshes from `trustwallet/assets`. Each
+    /// refresh re-fetches the repo tree from GitHub and pulls any
+    /// `info.json` blobs whose upstream SHA has changed. Default: 86_400
+    /// (24h).
+    #[serde(default = "default_tw_refresh_interval")]
+    pub refresh_interval: u64,
 }
 
 impl Default for TwAssetsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            tick_secs: default_tw_tick_secs(),
+            refresh_interval: default_tw_refresh_interval(),
         }
     }
 }
 
-fn default_tw_tick_secs() -> u64 {
+fn default_tw_refresh_interval() -> u64 {
     24 * 60 * 60
 }
 

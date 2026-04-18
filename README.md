@@ -460,9 +460,11 @@ curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT 
 
 ## Metadata
 
-Supplementary tables that enrich on-chain data with off-chain context.
+Supplementary tables that enrich raw indexed data. Split by source: **on-chain** metadata comes from calling contracts directly via Multicall3, **off-chain** metadata comes from curated third-party registries mirrored into Postgres.
 
-### ERC20 Tokens
+### On-chain
+
+#### ERC20 Tokens
 
 The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
 
@@ -472,7 +474,9 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
 
-### Assets
+### Off-chain
+
+#### Token Lists
 
 For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into the `tw_assets` table and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
 
@@ -485,19 +489,17 @@ Steady state is zero raw-CDN fetches per tick (SHAs match). The `logo.png` URL i
 
 Chain coverage is controlled by `TW_CHAIN_SLUGS` in [`src/sync/tw_assets.rs`](src/sync/tw_assets.rs). Chains not in that map are silently skipped (e.g. sepolia, private testnets).
 
-#### Configuration
-
-Tick cadence and enable-switch live under `[metadata.tw_assets]` in `config.toml`:
+Refresh cadence and enable-switch live under `[metadata.tw_assets]` in `config.toml`:
 
 ```toml
 [metadata.tw_assets]
-enabled = true       # default: true
-tick_secs = 86400    # default: 86_400 (24h)
+enabled = true             # default: true
+refresh_interval = 86400   # seconds between refreshes; default: 86_400 (24h)
 ```
 
 Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `tw_assets` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
 
-### Labels
+#### Labels
 
 Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT collections, etc.) sourced from [eth-labels](https://github.com/dawsbot/eth-labels) and stored in two per-chain tables:
 
