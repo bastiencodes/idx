@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::api::{ApiError, AppState};
 
-/// ERC20 Transfer(address,address,uint256) topic0.
-const TRANSFER_SELECTOR: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+/// ERC20 Transfer(address,address,uint256) topic0. The CH `logs` table
+/// stores hex columns with a `0x` prefix (see `src/sync/ch_sink.rs`
+/// `hex_encode`), so the literal below includes it.
+const TRANSFER_SELECTOR: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 #[derive(Deserialize)]
 pub struct TopTokensParams {
@@ -100,7 +102,8 @@ pub async fn list_top_tokens(
         .await
         .map_err(|e| ApiError::QueryError(format!("ClickHouse query failed: {e}")))?;
 
-    // (address_hex, count) preserving CH-ordered results.
+    // CH returns `address` as `0x…` lowercase hex; keep it as-is for the
+    // response and strip the prefix once for the PG lookup.
     let mut ranked: Vec<(String, i64)> = Vec::with_capacity(result.rows.len());
     for row in &result.rows {
         let addr = row
@@ -119,10 +122,10 @@ pub async fn list_top_tokens(
 
     let tokens: Vec<TopToken> = ranked
         .into_iter()
-        .map(|(addr_hex, transfer_count)| {
-            let meta = metadata.get(&addr_hex);
+        .map(|(addr_prefixed, transfer_count)| {
+            let meta = metadata.get(addr_prefixed.trim_start_matches("0x"));
             TopToken {
-                contract_address: format!("0x{addr_hex}"),
+                contract_address: addr_prefixed,
                 name: meta.and_then(|m| m.name.clone()),
                 symbol: meta.and_then(|m| m.symbol.clone()),
                 decimals: meta.and_then(|m| m.decimals),
@@ -174,7 +177,7 @@ async fn fetch_metadata(
 
     let addrs: Vec<Vec<u8>> = ranked
         .iter()
-        .filter_map(|(hex_addr, _)| hex::decode(hex_addr).ok())
+        .filter_map(|(hex_addr, _)| hex::decode(hex_addr.trim_start_matches("0x")).ok())
         .collect();
     if addrs.is_empty() {
         return Ok(out);
