@@ -43,6 +43,8 @@ pub enum SearchResult {
         name: Option<String>,
         #[serde(rename = "isTip20")]
         is_tip20: bool,
+        /// `true` only when Trust Wallet lists the token with `status = "active"`.
+        is_verified: bool,
     },
     Block {
         number: i64,
@@ -123,10 +125,18 @@ pub async fn search(
             }
         }
         Classified::Address(bytes) => {
+            let chain_id_i64 = params.chain_id as i64;
             if let Some(row) = conn
                 .query_opt(
-                    "SELECT name, symbol FROM erc20_tokens WHERE address = $1",
-                    &[&bytes],
+                    r#"
+                    SELECT t.name, t.symbol,
+                           COALESCE(tl.status = 'active', false) AS is_verified
+                    FROM erc20_tokens t
+                    LEFT JOIN token_list tl
+                      ON tl.source = $2 AND tl.chain_id = $3 AND tl.address = t.address
+                    WHERE t.address = $1
+                    "#,
+                    &[&bytes, &TW_SOURCE, &chain_id_i64],
                 )
                 .await
                 .map_err(|e| ApiError::QueryError(e.to_string()))?
@@ -136,6 +146,7 @@ pub async fn search(
                     name: row.get(0),
                     symbol: row.get(1),
                     is_tip20: true,
+                    is_verified: row.get(2),
                 });
             }
             // Always emit a generic address hit so callers have a navigable link
@@ -183,6 +194,7 @@ pub async fn search(
                     name: row.get(1),
                     symbol: row.get(2),
                     is_tip20: true,
+                    is_verified: row.get(3),
                 });
             }
         }
