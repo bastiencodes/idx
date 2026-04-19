@@ -17,7 +17,7 @@
 
 ---
 
-**tidx** indexes EVM chain data into a hybrid PostgreSQL + ClickHouse architecture for fast point lookups (OLTP) and lightning-fast analytics (OLAP). 
+**idx** indexes EVM chain data into a hybrid PostgreSQL + ClickHouse architecture for fast point lookups (OLTP) and lightning-fast analytics (OLAP). 
 
 ## Features
 
