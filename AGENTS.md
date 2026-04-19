@@ -1,7 +1,7 @@
 # IDX Agent Instructions
 
 ## Project Overview
-High-throughput multi-chain EVM indexer in Rust, inspired by golden-axe.
+High-throughput EVM blockchain indexer in Rust, inspired by golden-axe.
 
 ## Commands
 
