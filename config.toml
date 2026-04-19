@@ -31,6 +31,8 @@ url = "http://clickhouse:8123"
 # ENS reverse-resolution enrichment (opt-in per request via `?ens=true`).
 [chains.ens]
 enabled = true
+# registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"  # default, mainnet ENS Registry
+# stale_after_secs = 86400                                # default 24h cache TTL
 
 [[chains]]
 name = "sepolia"
