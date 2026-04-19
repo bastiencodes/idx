@@ -1,7 +1,7 @@
-# TIDX Agent Instructions
+# IDX Agent Instructions
 
 ## Project Overview
-High-throughput Tempo blockchain indexer in Rust, inspired by golden-axe.
+High-throughput multi-chain EVM indexer in Rust, inspired by golden-axe.
 
 ## Commands
 
@@ -100,16 +100,19 @@ cargo bench
 - `src/db/` - Database pool and schema management
 - `src/types.rs` - Core data types (BlockRow, TxRow, LogRow)
 - `migrations/` - SQL migrations
-- `tests/common/` - Test infrastructure (real Tempo node, TestDb, TestClickHouse)
+- `tests/common/` - Test infrastructure (real EVM node, TestDb, TestClickHouse)
 - `tests/smoke_test.rs` - PostgreSQL integration tests (sync, queries, events)
 - `tests/clickhouse_test.rs` - ClickHouse OLAP integration tests
 
-## Tempo Networks
+## Networks
 
-| Network | Chain ID | RPC |
-|---------|----------|-----|
-| Presto (mainnet) | 4217 | https://rpc.mainnet.tempo.xyz |
-| Moderato (testnet) | 42431 | https://rpc.testnet.tempo.xyz |
+Any EVM-compatible chain can be indexed. Configure RPC endpoints in `config.toml`.
+Examples:
+
+| Network | Chain ID |
+|---------|----------|
+| Ethereum Mainnet | 1 |
+| Sepolia | 11155111 |
 
 ## API Conventions
 
