@@ -10,8 +10,9 @@ use tracing::{error, info, warn};
 
 use tidx::api::{
     self, ChainClickHouseConfig, SharedChainNames, SharedClickHouseConfigs,
-    SharedClickHouseEngines, SharedPools,
+    SharedClickHouseEngines, SharedEnsConfigs, SharedPools, SharedRpcClients,
 };
+use tidx::sync::fetcher::RpcClient;
 use tidx::broadcast::Broadcaster;
 use tidx::clickhouse::ClickHouseEngine;
 use tidx::config::{ChainConfig, Config, ConfigWatcher, MetadataConfig, NewChainEvent};
@@ -76,6 +77,8 @@ pub async fn run(args: Args) -> Result<()> {
     let clickhouse_configs: SharedClickHouseConfigs = Arc::new(RwLock::new(HashMap::new()));
     let clickhouse_engines: SharedClickHouseEngines = Arc::new(RwLock::new(HashMap::new()));
     let chain_names: SharedChainNames = Arc::new(RwLock::new(HashMap::new()));
+    let rpc_clients: SharedRpcClients = Arc::new(RwLock::new(HashMap::new()));
+    let ens_configs: SharedEnsConfigs = Arc::new(RwLock::new(HashMap::new()));
     let mut default_chain_id = 0u64;
 
     for chain in &config.chains {
@@ -119,6 +122,30 @@ pub async fn run(args: Args) -> Result<()> {
             .await
             .insert(chain.chain_id, chain.name.clone());
 
+        // Per-chain RPC client for enrichment paths that read onchain live
+        // (e.g. `?ens=true`). Shares rpc_url with the sync engine; separate
+        // client instance so enrichment load doesn't share a concurrency
+        // limiter with block-range fetches.
+        rpc_clients
+            .write()
+            .await
+            .insert(chain.chain_id, RpcClient::new(&chain.rpc_url));
+
+        if let Some(ref ens_cfg) = chain.ens {
+            if ens_cfg.enabled {
+                ens_configs
+                    .write()
+                    .await
+                    .insert(chain.chain_id, ens_cfg.clone());
+                info!(
+                    chain = %chain.name,
+                    chain_id = chain.chain_id,
+                    stale_after_secs = ens_cfg.stale_after_secs,
+                    "ENS enrichment enabled"
+                );
+            }
+        }
+
         spawn_sync_engine(
             chain.clone(),
             config.metadata.clone(),
@@ -144,6 +171,8 @@ pub async fn run(args: Args) -> Result<()> {
                 Arc::clone(&clickhouse_configs),
                 Arc::clone(&clickhouse_engines),
                 Arc::clone(&chain_names),
+                Arc::clone(&rpc_clients),
+                Arc::clone(&ens_configs),
                 config.http.trusted_cidrs.clone(),
             );
 
@@ -168,6 +197,8 @@ pub async fn run(args: Args) -> Result<()> {
         let pools_for_watcher = Arc::clone(&pools);
         let clickhouse_configs_for_watcher = Arc::clone(&clickhouse_configs);
         let chain_names_for_watcher = Arc::clone(&chain_names);
+        let rpc_clients_for_watcher = Arc::clone(&rpc_clients);
+        let ens_configs_for_watcher = Arc::clone(&ens_configs);
         let broadcaster_for_watcher = broadcaster.clone();
         let shutdown_tx_for_watcher = shutdown_tx.clone();
         let metadata_for_watcher = config.metadata.clone();
@@ -193,6 +224,18 @@ pub async fn run(args: Args) -> Result<()> {
                             .write()
                             .await
                             .insert(event.chain.chain_id, event.chain.name.clone());
+                        rpc_clients_for_watcher
+                            .write()
+                            .await
+                            .insert(event.chain.chain_id, RpcClient::new(&event.chain.rpc_url));
+                        if let Some(ref ens_cfg) = event.chain.ens {
+                            if ens_cfg.enabled {
+                                ens_configs_for_watcher
+                                    .write()
+                                    .await
+                                    .insert(event.chain.chain_id, ens_cfg.clone());
+                            }
+                        }
 
                         spawn_sync_engine(
                             event.chain,
@@ -216,6 +259,8 @@ pub async fn run(args: Args) -> Result<()> {
             broadcaster.clone(),
             clickhouse_configs.read().await.clone(),
             chain_names.read().await.clone(),
+            rpc_clients.read().await.clone(),
+            ens_configs.read().await.clone(),
             &config.http,
         );
 

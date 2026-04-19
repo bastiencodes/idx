@@ -65,22 +65,33 @@ pub const ENS_REGISTRY_MAINNET: Address = address!("00000000000C2E074eC69A0dFb29
 pub const DEFAULT_STALE_AFTER_SECS: i64 = 86_400;
 
 /// Per-chain ENS configuration. Constructed from `[chains.ens]` in the TOML
-/// config in commit 3; exposed here so this module has no `crate::config`
-/// dependency and stays unit-testable in isolation.
+/// config; exposed here so this module has no `crate::config` dependency and
+/// stays unit-testable in isolation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsConfig {
     /// When `false`, `lookup_batch` short-circuits to an empty map regardless
     /// of cache state. Enrichment call sites should also gate on this.
+    #[serde(default)]
     pub enabled: bool,
 
     /// Address of the ENS Registry contract for this chain. Mainnet is the
     /// only supported deployment in v1; configurable so sepolia (or forks)
     /// can be wired in later without a code change.
+    #[serde(default = "default_ens_registry")]
     pub registry: Address,
 
     /// Positive + negative cache TTL in seconds. See module docstring for
     /// staleness semantics.
+    #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: i64,
+}
+
+fn default_ens_registry() -> Address {
+    ENS_REGISTRY_MAINNET
+}
+
+fn default_stale_after_secs() -> i64 {
+    DEFAULT_STALE_AFTER_SECS
 }
 
 impl Default for EnsConfig {
