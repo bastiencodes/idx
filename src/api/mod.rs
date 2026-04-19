@@ -666,6 +666,24 @@ pub enum ApiError {
     NotFound(String),
 }
 
+/// Convert a `tokio_postgres::Error` into an `ApiError`, preserving the
+/// server's message.
+///
+/// tokio-postgres 0.7's `Display` for `Kind::Db` is the literal string
+/// `"db error"` with no cause appended — the real message lives on the
+/// `DbError` cause. SQLSTATE `57014` (QUERY_CANCELED) is what
+/// `statement_timeout` triggers, and must be mapped to `Timeout` so clients
+/// see 408 rather than a 422 with a useless body.
+pub fn classify_pg_error(e: tokio_postgres::Error) -> ApiError {
+    if let Some(db) = e.as_db_error() {
+        if *db.code() == tokio_postgres::error::SqlState::QUERY_CANCELED {
+            return ApiError::Timeout;
+        }
+        return ApiError::QueryError(db.message().to_string());
+    }
+    ApiError::QueryError(e.to_string())
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

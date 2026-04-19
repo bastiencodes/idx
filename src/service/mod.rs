@@ -215,7 +215,22 @@ pub async fn execute_query_postgres(
             metrics::record_query_duration(start.elapsed());
             rows
         }
-        Ok(Err(e)) => return Err(anyhow!("Query error: {}", sanitize_db_error(&e.to_string()))),
+        Ok(Err(e)) => {
+            // tokio-postgres 0.7's Display for Kind::Db is just "db error" —
+            // the actual server message (and SQLSTATE) live on the DbError
+            // cause. Surface both so timeouts and other server errors are
+            // classifiable downstream.
+            if let Some(db) = e.as_db_error() {
+                if *db.code() == tokio_postgres::error::SqlState::QUERY_CANCELED {
+                    return Err(anyhow!("Query timeout"));
+                }
+                return Err(anyhow!(
+                    "Query error: {}",
+                    sanitize_db_error(db.message())
+                ));
+            }
+            return Err(anyhow!("Query error: {}", sanitize_db_error(&e.to_string())));
+        }
         Err(_) => return Err(anyhow!("Query timeout")),
     };
 

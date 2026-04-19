@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
-use crate::api::{ApiError, AppState};
+use crate::api::{classify_pg_error, ApiError, AppState};
 
 /// ERC20 Transfer(address,address,uint256) topic0
 const TRANSFER_SELECTOR: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -152,24 +152,24 @@ pub async fn list_transfers(
         .await
         .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
 
-    conn.execute("SET statement_timeout = 5000", &[])
+    // 15s: USDC/USDT-as-account runs ~3s on a block_num-walk plan (sparse
+    // matches force the planner to scan most of `logs` backward looking for
+    // hits). 5s was too tight and cold-cache requests hit `statement_timeout`.
+    // See the /erc20/transfers benchmarks in PR history for the density
+    // tradeoff — a proper fix would add (topic1, block_num DESC) /
+    // (topic2, block_num DESC) indexes.
+    conn.execute("SET statement_timeout = 15000", &[])
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to set timeout: {e}")))?;
 
     let start = Instant::now();
     let rows = tokio::time::timeout(
-        std::time::Duration::from_millis(5100),
+        std::time::Duration::from_millis(15100),
         conn.query(&sql, &[&cb, &cl, &limit]),
     )
     .await
     .map_err(|_| ApiError::Timeout)?
-    .map_err(|e| {
-        if e.to_string().contains("timeout") {
-            ApiError::Timeout
-        } else {
-            ApiError::QueryError(e.to_string())
-        }
-    })?;
+    .map_err(classify_pg_error)?;
 
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
